@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.concurrent.locks.Lock;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import org.h2.api.ErrorCode;
@@ -66,7 +67,9 @@ public class BackupCommand extends Prepared {
                 // synchronize on the database, to avoid concurrent temp file
                 // creation / deletion / backup
                 String base = FileUtils.getParent(db.getName());
-                synchronized (db.getLobSyncObject()) {
+                Lock lobSyncObject = db.getLobSyncObject();
+                lobSyncObject.lock();
+                try {
                     String prefix = db.getDatabasePath();
                     String dir = FileUtils.getParent(prefix);
                     dir = FileLister.getDir(dir);
@@ -84,6 +87,8 @@ public class BackupCommand extends Prepared {
                             }
                         }
                     }
+                } finally {
+                    lobSyncObject.unlock();
                 }
                 out.close();
             }

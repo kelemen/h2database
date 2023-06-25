@@ -13,6 +13,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.List;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBase;
 import org.h2.store.fs.FilePath;
 import org.h2.store.fs.FilePathWrapper;
@@ -251,6 +253,7 @@ class FileDebug extends FileBase {
     private final FilePathDebug debug;
     private final FileChannel channel;
     private final String name;
+    private final Lock lock = new ReentrantLock();
 
     FileDebug(FilePathDebug debug, FileChannel channel, String name) {
         this.debug = debug;
@@ -328,10 +331,15 @@ class FileDebug extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
         debug("tryLock");
-        return channel.tryLock(position, size, shared);
+        lock.lock();
+        try {
+            return channel.tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

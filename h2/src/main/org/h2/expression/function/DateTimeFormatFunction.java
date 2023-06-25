@@ -20,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Objects;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
@@ -112,6 +114,7 @@ public final class DateTimeFormatFunction extends FunctionN {
         }
 
     };
+    private static final Lock CACHE_LOCK = new ReentrantLock();
 
     private final int function;
 
@@ -250,7 +253,8 @@ public final class DateTimeFormatFunction extends FunctionN {
             try {
                 CacheValue value;
                 CacheKey key = new CacheKey(format, locale, timeZone);
-                synchronized (CACHE) {
+                CACHE_LOCK.lock();
+                try {
                     value = CACHE.get(key);
                     if (value == null) {
                         DateTimeFormatter df;
@@ -269,6 +273,8 @@ public final class DateTimeFormatFunction extends FunctionN {
                         value = new CacheValue(df, zoneId);
                         CACHE.put(key, value);
                     }
+                } finally {
+                    CACHE_LOCK.unlock();
                 }
                 return value;
             } catch (Exception e) {

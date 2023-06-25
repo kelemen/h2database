@@ -11,6 +11,8 @@ import java.lang.ref.ReferenceQueue;
 import java.util.ArrayList;
 import java.util.HashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
 import org.h2.store.fs.FileUtils;
@@ -22,6 +24,7 @@ public class TempFileDeleter {
 
     private final ReferenceQueue<Object> queue = new ReferenceQueue<>();
     private final HashMap<PhantomReference<?>, Object> refMap = new HashMap<>();
+    private final Lock lock = new ReentrantLock();
 
     private TempFileDeleter() {
         // utility class
@@ -39,16 +42,21 @@ public class TempFileDeleter {
      * @param monitor the object to monitor
      * @return the reference that can be used to stop deleting the file or closing the closeable
      */
-    public synchronized Reference<?> addFile(Object resource, Object monitor) {
-        if (!(resource instanceof String) && !(resource instanceof AutoCloseable)) {
-            throw DbException.getUnsupportedException("Unsupported resource " + resource);
+    public Reference<?> addFile(Object resource, Object monitor) {
+        lock.lock();
+        try {
+            if (!(resource instanceof String) && !(resource instanceof AutoCloseable)) {
+                throw DbException.getUnsupportedException("Unsupported resource " + resource);
+            }
+            IOUtils.trace("TempFileDeleter.addFile",
+                    resource instanceof String ? (String) resource : "-", monitor);
+            PhantomReference<?> ref = new PhantomReference<>(monitor, queue);
+            refMap.put(ref, resource);
+            deleteUnused();
+            return ref;
+        } finally {
+            lock.unlock();
         }
-        IOUtils.trace("TempFileDeleter.addFile",
-                resource instanceof String ? (String) resource : "-", monitor);
-        PhantomReference<?> ref = new PhantomReference<>(monitor, queue);
-        refMap.put(ref, resource);
-        deleteUnused();
-        return ref;
     }
 
     /**
@@ -58,36 +66,41 @@ public class TempFileDeleter {
      * @param ref the reference as returned by addFile
      * @param resource the file name or closeable
      */
-    public synchronized void deleteFile(Reference<?> ref, Object resource) {
-        if (ref != null) {
-            Object f2 = refMap.remove(ref);
-            if (f2 != null) {
-                if (SysProperties.CHECK) {
-                    if (resource != null && !f2.equals(resource)) {
-                        throw DbException.getInternalError("f2:" + f2 + " f:" + resource);
+    public void deleteFile(Reference<?> ref, Object resource) {
+        lock.lock();
+        try {
+            if (ref != null) {
+                Object f2 = refMap.remove(ref);
+                if (f2 != null) {
+                    if (SysProperties.CHECK) {
+                        if (resource != null && !f2.equals(resource)) {
+                            throw DbException.getInternalError("f2:" + f2 + " f:" + resource);
+                        }
+                    }
+                    resource = f2;
+                }
+            }
+            if (resource instanceof String) {
+                String fileName = (String) resource;
+                if (FileUtils.exists(fileName)) {
+                    try {
+                        IOUtils.trace("TempFileDeleter.deleteFile", fileName, null);
+                        FileUtils.tryDelete(fileName);
+                    } catch (Exception e) {
+                        // TODO log such errors?
                     }
                 }
-                resource = f2;
-            }
-        }
-        if (resource instanceof String) {
-            String fileName = (String) resource;
-            if (FileUtils.exists(fileName)) {
+            } else if (resource instanceof AutoCloseable) {
+                AutoCloseable closeable = (AutoCloseable) resource;
                 try {
-                    IOUtils.trace("TempFileDeleter.deleteFile", fileName, null);
-                    FileUtils.tryDelete(fileName);
+                    IOUtils.trace("TempFileDeleter.deleteCloseable", "-", null);
+                    closeable.close();
                 } catch (Exception e) {
                     // TODO log such errors?
                 }
             }
-        } else if (resource instanceof AutoCloseable) {
-            AutoCloseable closeable = (AutoCloseable) resource;
-            try {
-                IOUtils.trace("TempFileDeleter.deleteCloseable", "-", null);
-                closeable.close();
-            } catch (Exception e) {
-                // TODO log such errors?
-            }
+        } finally {
+            lock.unlock();
         }
     }
 

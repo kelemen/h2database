@@ -8,6 +8,7 @@ package org.h2.store.fs;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.concurrent.locks.Lock;
 
 /**
  * Default implementation of the slow operations that need synchronization because they
@@ -18,44 +19,74 @@ public abstract class FileBaseDefault extends FileBase {
     private long position = 0;
 
     @Override
-    public final synchronized long position() throws IOException {
-        return position;
+    public final long position() throws IOException {
+        Lock channelLock = channelLock();
+        channelLock.lock();
+        try {
+            return position;
+        } finally {
+            channelLock.unlock();
+        }
     }
 
     @Override
-    public final synchronized FileChannel position(long newPosition) throws IOException {
-        if (newPosition < 0) {
-            throw new IllegalArgumentException();
+    public final FileChannel position(long newPosition) throws IOException {
+        Lock channelLock = channelLock();
+        channelLock.lock();
+        try {
+            if (newPosition < 0) {
+                throw new IllegalArgumentException();
+            }
+            position = newPosition;
+            return this;
+        } finally {
+            channelLock.unlock();
         }
-        position = newPosition;
-        return this;
     }
 
     @Override
-    public final synchronized int read(ByteBuffer dst) throws IOException {
-        int read = read(dst, position);
-        if (read > 0) {
-            position += read;
+    public final int read(ByteBuffer dst) throws IOException {
+        Lock channelLock = channelLock();
+        channelLock.lock();
+        try {
+            int read = read(dst, position);
+            if (read > 0) {
+                position += read;
+            }
+            return read;
+        } finally {
+            channelLock.unlock();
         }
-        return read;
     }
 
     @Override
-    public final synchronized int write(ByteBuffer src) throws IOException {
-        int written = write(src, position);
-        if (written > 0) {
-            position += written;
+    public final int write(ByteBuffer src) throws IOException {
+        Lock channelLock = channelLock();
+        channelLock.lock();
+        try {
+            int written = write(src, position);
+            if (written > 0) {
+                position += written;
+            }
+            return written;
+        } finally {
+            channelLock.unlock();
         }
-        return written;
     }
 
     @Override
-    public final synchronized FileChannel truncate(long newLength) throws IOException {
-        implTruncate(newLength);
-        if (newLength < position) {
-            position = newLength;
+    public final FileChannel truncate(long newLength) throws IOException {
+        Lock channelLock = channelLock();
+        channelLock.lock();
+        try {
+            implTruncate(newLength);
+            if (newLength < position) {
+                position = newLength;
+            }
+            return this;
+        } finally {
+            channelLock.unlock();
         }
-        return this;
     }
 
     /**

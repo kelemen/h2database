@@ -10,6 +10,8 @@ import java.nio.channels.NonWritableChannelException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.h2.compress.CompressLZF;
 import org.h2.util.MathUtils;
@@ -25,7 +27,7 @@ class FileNioMemData {
 
     private static final int BLOCK_SIZE = 1 << BLOCK_SIZE_SHIFT;
     private static final int BLOCK_SIZE_MASK = BLOCK_SIZE - 1;
-    private static final ByteBuffer COMPRESSED_EMPTY_BLOCK;
+    private static final ByteBufferRef COMPRESSED_EMPTY_BLOCK;
 
     private static final ThreadLocal<CompressLZF> LZF_THREAD_LOCAL = ThreadLocal.withInitial(CompressLZF::new);
 
@@ -45,19 +47,20 @@ class FileNioMemData {
     private final boolean compress;
     private final float compressLaterCachePercent;
     private volatile long length;
-    private AtomicReference<ByteBuffer>[] buffers;
+    private AtomicReference<ByteBufferRef>[] buffers;
     private long lastModified;
     private boolean isReadOnly;
     private boolean isLockedExclusive;
     private int sharedLockCount;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final Lock lock = new ReentrantLock();
 
     static {
         final byte[] n = new byte[BLOCK_SIZE];
         final byte[] output = new byte[BLOCK_SIZE * 2];
         int len = new CompressLZF().compress(n, 0, BLOCK_SIZE, output, 0);
-        COMPRESSED_EMPTY_BLOCK = ByteBuffer.allocateDirect(len);
-        COMPRESSED_EMPTY_BLOCK.put(output, 0, len);
+        COMPRESSED_EMPTY_BLOCK = new ByteBufferRef(ByteBuffer.allocateDirect(len));
+        COMPRESSED_EMPTY_BLOCK.buffer().put(output, 0, len);
     }
 
     @SuppressWarnings("unchecked")
@@ -75,12 +78,17 @@ class FileNioMemData {
      *
      * @return if locking was successful
      */
-    synchronized boolean lockExclusive() {
-        if (sharedLockCount > 0 || isLockedExclusive) {
-            return false;
+    boolean lockExclusive() {
+        lock.lock();
+        try {
+            if (sharedLockCount > 0 || isLockedExclusive) {
+                return false;
+            }
+            isLockedExclusive = true;
+            return true;
+        } finally {
+            lock.unlock();
         }
-        isLockedExclusive = true;
-        return true;
     }
 
     /**
@@ -88,22 +96,32 @@ class FileNioMemData {
      *
      * @return if locking was successful
      */
-    synchronized boolean lockShared() {
-        if (isLockedExclusive) {
-            return false;
+    boolean lockShared() {
+        lock.lock();
+        try {
+            if (isLockedExclusive) {
+                return false;
+            }
+            sharedLockCount++;
+            return true;
+        } finally {
+            lock.unlock();
         }
-        sharedLockCount++;
-        return true;
     }
 
     /**
      * Unlock the file.
      */
-    synchronized void unlock() {
-        if (isLockedExclusive) {
-            isLockedExclusive = false;
-        } else {
-            sharedLockCount = Math.max(0, sharedLockCount - 1);
+    void unlock() {
+        lock.lock();
+        try {
+            if (isLockedExclusive) {
+                isLockedExclusive = false;
+            } else {
+                sharedLockCount = Math.max(0, sharedLockCount - 1);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -114,15 +132,22 @@ class FileNioMemData {
 
         private static final long serialVersionUID = 1L;
         private int size;
+        private final Lock lock;
 
         CompressLaterCache(int size) {
             super(size, (float) 0.75, true);
             this.size = size;
+            this.lock = new ReentrantLock();
         }
 
         @Override
-        public synchronized V put(K key, V value) {
-            return super.put(key, value);
+        public V put(K key, V value) {
+            lock.lock();
+            try {
+                return super.put(key, value);
+            } finally {
+                lock.unlock();
+            }
         }
 
         @Override
@@ -137,6 +162,24 @@ class FileNioMemData {
 
         public void setCacheSize(int size) {
             this.size = size;
+        }
+    }
+
+    private static final class ByteBufferRef {
+        private final ByteBuffer buffer;
+        private final Lock lock;
+
+        public ByteBufferRef(ByteBuffer buffer) {
+            this.buffer = buffer;
+            this.lock = new ReentrantLock();
+        }
+
+        public ByteBuffer buffer() {
+            return buffer;
+        }
+
+        public Lock lock() {
+            return lock;
         }
     }
 
@@ -182,22 +225,27 @@ class FileNioMemData {
     }
 
     private ByteBuffer expandPage(int page) {
-        final ByteBuffer d = buffers[page].get();
+        final ByteBufferRef dRef = buffers[page].get();
+        final ByteBuffer d = dRef.buffer();
         if (d.capacity() == BLOCK_SIZE) {
             // already expanded, or not compressed
             return d;
         }
-        synchronized (d) {
+        Lock dLock = dRef.lock();
+        dLock.lock();
+        try {
             if (d.capacity() == BLOCK_SIZE) {
                 return d;
             }
             ByteBuffer out = ByteBuffer.allocateDirect(BLOCK_SIZE);
-            if (d != COMPRESSED_EMPTY_BLOCK) {
+            if (dRef != COMPRESSED_EMPTY_BLOCK) {
                 d.position(0);
                 CompressLZF.expand(d, out);
             }
-            buffers[page].compareAndSet(d, out);
+            buffers[page].compareAndSet(dRef, new ByteBufferRef(out));
             return out;
+        } finally {
+            dLock.unlock();
         }
     }
 
@@ -207,8 +255,11 @@ class FileNioMemData {
      * @param page which page to compress
      */
     void compressPage(int page) {
-        final ByteBuffer d = buffers[page].get();
-        synchronized (d) {
+        final ByteBufferRef dRef = buffers[page].get();
+        final ByteBuffer d = dRef.buffer();
+        Lock dLock = dRef.lock();
+        dLock.lock();
+        try {
             if (d.capacity() != BLOCK_SIZE) {
                 // already compressed
                 return;
@@ -217,7 +268,9 @@ class FileNioMemData {
             int len = LZF_THREAD_LOCAL.get().compress(d, 0, compressOutputBuffer, 0);
             ByteBuffer out = ByteBuffer.allocateDirect(len);
             out.put(compressOutputBuffer, 0, len);
-            buffers[page].compareAndSet(d, out);
+            buffers[page].compareAndSet(dRef, new ByteBufferRef(out));
+        } finally {
+            dLock.unlock();
         }
     }
 
@@ -273,7 +326,7 @@ class FileNioMemData {
         len = MathUtils.roundUpLong(len, BLOCK_SIZE);
         int blocks = (int) (len >>> BLOCK_SIZE_SHIFT);
         if (blocks != buffers.length) {
-            final AtomicReference<ByteBuffer>[] newBuffers = new AtomicReference[blocks];
+            final AtomicReference<ByteBufferRef>[] newBuffers = new AtomicReference[blocks];
             System.arraycopy(buffers, 0, newBuffers, 0,
                     Math.min(buffers.length, newBuffers.length));
             for (int i = buffers.length; i < blocks; i++) {

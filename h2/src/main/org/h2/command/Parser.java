@@ -145,6 +145,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.StringJoiner;
 import java.util.TreeSet;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.api.IntervalQualifier;
 import org.h2.api.Trigger;
@@ -7456,7 +7458,9 @@ public class Parser {
         // it twice - once without the flag set, and if we didn't see a recursive term,
         // then we just compile it again.
         TableView view;
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             view = new TableView(schema, id, cteViewName, querySQL,
                     queryParameters, columnTemplateArray, session,
                     allowRecursiveQueryDetection, false, true,
@@ -7476,6 +7480,8 @@ public class Parser {
             }
             // both removeSchemaObject and removeLocalTempTable hold meta locks
             database.unlockMeta(session);
+        } finally {
+            sessionLock.unlock();
         }
         view.setTableExpression(true);
         view.setTemporary(isTemporary);

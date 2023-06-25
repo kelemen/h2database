@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.DateTools;
@@ -61,6 +63,7 @@ public class FullTextLucene extends FullText {
             Utils.getProperty("h2.storeDocumentTextInIndex", false);
 
     private static final HashMap<String, IndexAccess> INDEX_ACCESS = new HashMap<>();
+    private static final Lock INDEX_ACCESS_LOCK = new ReentrantLock();
     private static final String TRIGGER_PREFIX = "FTL_";
     private static final String SCHEMA = "FTL";
     private static final String LUCENE_FIELD_DATA = "_DATA";
@@ -296,7 +299,8 @@ public class FullTextLucene extends FullText {
     protected static IndexAccess getIndexAccess(Connection conn)
             throws SQLException {
         String path = getIndexPath(conn);
-        synchronized (INDEX_ACCESS) {
+        INDEX_ACCESS_LOCK.lock();
+        try {
             IndexAccess access = INDEX_ACCESS.get(path);
             while (access == null) {
                 try {
@@ -318,6 +322,8 @@ public class FullTextLucene extends FullText {
                 break;
             }
             return access;
+        } finally {
+            INDEX_ACCESS_LOCK.unlock();
         }
     }
 
@@ -388,7 +394,8 @@ public class FullTextLucene extends FullText {
      */
     protected static void removeIndexAccess(String indexPath)
             throws SQLException {
-        synchronized (INDEX_ACCESS) {
+        INDEX_ACCESS_LOCK.lock();
+        try {
             try {
                 IndexAccess access = INDEX_ACCESS.remove(indexPath);
                 if(access != null) {
@@ -397,6 +404,8 @@ public class FullTextLucene extends FullText {
             } catch (Exception e) {
                 throw convertException(e);
             }
+        } finally {
+            INDEX_ACCESS_LOCK.unlock();
         }
     }
 
@@ -708,9 +717,11 @@ public class FullTextLucene extends FullText {
          * The index searcher.
          */
         private IndexSearcher searcher;
+        private final Lock lock;
 
         IndexAccess(IndexWriter writer) throws IOException {
             this.writer = writer;
+            this.lock = new ReentrantLock();
             initializeSearcher();
         }
 
@@ -720,11 +731,16 @@ public class FullTextLucene extends FullText {
          * @return the searcher
          * @throws IOException on failure
          */
-        synchronized IndexSearcher getSearcher() throws IOException {
-            if (!searcher.getIndexReader().tryIncRef()) {
-                initializeSearcher();
+        IndexSearcher getSearcher() throws IOException {
+            lock.lock();
+            try {
+                if (!searcher.getIndexReader().tryIncRef()) {
+                    initializeSearcher();
+                }
+                return searcher;
+            } finally {
+                lock.unlock();
             }
-            return searcher;
         }
 
         private void initializeSearcher() throws IOException {
@@ -738,27 +754,42 @@ public class FullTextLucene extends FullText {
          * @param searcher the searcher
          * @throws IOException on failure
          */
-        synchronized void returnSearcher(IndexSearcher searcher) throws IOException {
-            searcher.getIndexReader().decRef();
+        void returnSearcher(IndexSearcher searcher) throws IOException {
+            lock.lock();
+            try {
+                searcher.getIndexReader().decRef();
+            } finally {
+                lock.unlock();
+            }
         }
 
         /**
          * Commit the changes.
          * @throws IOException on failure
          */
-        public synchronized void commit() throws IOException {
-            writer.commit();
-            returnSearcher(searcher);
-            searcher = new IndexSearcher(DirectoryReader.open(writer));
+        public void commit() throws IOException {
+            lock.lock();
+            try {
+                writer.commit();
+                returnSearcher(searcher);
+                searcher = new IndexSearcher(DirectoryReader.open(writer));
+            } finally {
+                lock.unlock();
+            }
         }
 
         /**
          * Close the index.
          * @throws IOException on failure
          */
-        public synchronized void close() throws IOException {
-            searcher = null;
-            writer.close();
+        public void close() throws IOException {
+            lock.lock();
+            try {
+                searcher = null;
+                writer.close();
+            } finally {
+                lock.unlock();
+            }
         }
     }
 }

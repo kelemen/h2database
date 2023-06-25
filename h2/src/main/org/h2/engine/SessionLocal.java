@@ -19,6 +19,8 @@ import java.util.Random;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.api.JavaObjectSerializer;
 import org.h2.command.Command;
@@ -411,8 +413,12 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
         if (localTempTables != null) {
             localTempTables.remove(table.getName());
         }
-        synchronized (database) {
+        Lock dbLock = database.dbLock();
+        dbLock.lock();
+        try {
             table.removeChildrenAndResources(this);
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -460,8 +466,12 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
     public void removeLocalTempTableIndex(Index index) {
         if (localTempTableIndexes != null) {
             localTempTableIndexes.remove(index.getName());
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 index.removeChildrenAndResources(this);
+            } finally {
+                dbLock.unlock();
             }
         }
     }
@@ -517,8 +527,12 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
     void removeLocalTempTableConstraint(Constraint constraint) {
         if (localTempTableConstraints != null) {
             localTempTableConstraints.remove(constraint.getName());
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 constraint.removeChildrenAndResources(this);
+            } finally {
+                dbLock.unlock();
             }
         }
     }
@@ -549,9 +563,15 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
     }
 
     @Override
-    public synchronized CommandInterface prepareCommand(String sql,
+    public CommandInterface prepareCommand(String sql,
             int fetchSize) {
-        return prepareLocal(sql);
+        Lock sessionLock = sessionLock();
+        sessionLock.lock();
+        try {
+            return prepareLocal(sql);
+        } finally {
+            sessionLock.unlock();
+        }
     }
 
     /**
@@ -703,8 +723,7 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
         // On rare occasions it can be called concurrently (i.e. from close())
         // without proper locking, but instead of oversynchronizing
         // we just skip this optional operation in such case
-        if (tablesToAnalyze != null &&
-                Thread.holdsLock(this)) {
+        if (tablesToAnalyze != null && sessionLock().isHeldByCurrentThread()) {
             // take a local copy and clear because in rare cases we can call
             // back into markTableForAnalyze while iterating here
             HashSet<Table> tablesToAnalyzeLocal = tablesToAnalyze;
@@ -1488,7 +1507,7 @@ public final class SessionLocal extends Session implements TransactionStore.Roll
             if (exclusive == null || exclusive == this) {
                 break;
             }
-            if (Thread.holdsLock(exclusive)) {
+            if (exclusive.sessionLock().isHeldByCurrentThread()) {
                 // if another connection is used within the connection
                 break;
             }

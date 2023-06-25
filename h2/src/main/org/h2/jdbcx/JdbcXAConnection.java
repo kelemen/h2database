@@ -11,6 +11,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
 import javax.sql.ConnectionEvent;
 import javax.sql.ConnectionEventListener;
 import javax.sql.StatementEventListener;
@@ -447,30 +448,48 @@ public final class JdbcXAConnection extends TraceObject implements XAConnection,
         }
 
         @Override
-        public synchronized void close() throws SQLException {
-            if (!isClosed) {
-                try {
-                    rollback();
-                    setAutoCommit(true);
-                } catch (SQLException e) {
-                    // ignore
+        public void close() throws SQLException {
+            Lock connectionLock = connectionLock();
+            connectionLock.lock();
+            try {
+                if (!isClosed) {
+                    try {
+                        rollback();
+                        setAutoCommit(true);
+                    } catch (SQLException e) {
+                        // ignore
+                    }
+                    closedHandle();
+                    isClosed = true;
                 }
-                closedHandle();
-                isClosed = true;
+            } finally {
+                connectionLock.unlock();
             }
         }
 
         @Override
-        public synchronized boolean isClosed() throws SQLException {
-            return isClosed || super.isClosed();
+        public boolean isClosed() throws SQLException {
+            Lock connectionLock = connectionLock();
+            connectionLock.lock();
+            try {
+                return isClosed || super.isClosed();
+            } finally {
+                connectionLock.unlock();
+            }
         }
 
         @Override
-        protected synchronized void checkClosed() {
-            if (isClosed) {
-                throw DbException.get(ErrorCode.OBJECT_CLOSED);
+        protected void checkClosed() {
+            Lock connectionLock = connectionLock();
+            connectionLock.lock();
+            try {
+                if (isClosed) {
+                    throw DbException.get(ErrorCode.OBJECT_CLOSED);
+                }
+                super.checkClosed();
+            } finally {
+                connectionLock.unlock();
             }
-            super.checkClosed();
         }
 
     }

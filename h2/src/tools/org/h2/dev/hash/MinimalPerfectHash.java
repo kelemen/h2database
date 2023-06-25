@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
@@ -450,6 +452,8 @@ public class MinimalPerfectHash<K> {
             final int level,
             final int seed,
             ByteArrayOutputStream out) {
+
+        Lock listsLock = new ReentrantLock();
         final ArrayList<ByteArrayOutputStream> outList =
                 new ArrayList<>();
         int processors = Runtime.getRuntime().availableProcessors();
@@ -465,12 +469,15 @@ public class MinimalPerfectHash<K> {
                             ArrayList<K> list;
                             ByteArrayOutputStream temp =
                                     new ByteArrayOutputStream();
-                            synchronized (lists) {
+                            listsLock.lock();
+                            try {
                                 if (lists.isEmpty()) {
                                     break;
                                 }
                                 list = lists.remove(0);
                                 outList.add(temp);
+                            } finally {
+                                listsLock.unlock();
                             }
                             generate(list, hash, level + 1, seed, temp);
                         }

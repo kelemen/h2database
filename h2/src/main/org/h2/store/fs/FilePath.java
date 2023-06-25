@@ -12,6 +12,8 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.disk.FilePathDisk;
 import org.h2.util.MathUtils;
 
@@ -22,7 +24,7 @@ import org.h2.util.MathUtils;
  * <code>FileSystems</code>
  */
 public abstract class FilePath {
-
+    private static final Lock CLASS_LOCK = new ReentrantLock();
     private static final FilePath defaultProvider;
 
     private static final ConcurrentHashMap<String, FilePath> providers;
@@ -305,12 +307,17 @@ public abstract class FilePath {
      * @param newRandom if the random part of the filename should change
      * @return the file name part
      */
-    private static synchronized String getNextTempFileNamePart(
+    private static String getNextTempFileNamePart(
             boolean newRandom) {
-        if (newRandom || tempRandom == null) {
-            tempRandom = MathUtils.randomInt(Integer.MAX_VALUE) + ".";
+        CLASS_LOCK.lock();
+        try {
+            if (newRandom || tempRandom == null) {
+                tempRandom = MathUtils.randomInt(Integer.MAX_VALUE) + ".";
+            }
+            return tempRandom + tempSequence++;
+        } finally {
+            CLASS_LOCK.unlock();
         }
-        return tempRandom + tempSequence++;
     }
 
     /**

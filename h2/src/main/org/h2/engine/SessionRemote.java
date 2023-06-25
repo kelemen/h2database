@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.net.Socket;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.DatabaseEventListener;
 import org.h2.api.ErrorCode;
 import org.h2.api.JavaObjectSerializer;
@@ -88,7 +90,7 @@ public final class SessionRemote extends Session implements DataHandler {
     private String databaseName;
     private String cipher;
     private byte[] fileEncryptionKey;
-    private final Object lobSyncObject = new Object();
+    private final Lock lobSyncObject = new ReentrantLock();
     private String sessionId;
     private int clientVersion;
     private boolean autoReconnect;
@@ -264,17 +266,23 @@ public final class SessionRemote extends Session implements DataHandler {
         }
     }
 
-    private synchronized void setAutoCommitSend(boolean autoCommit) {
-        for (int i = 0, count = 0; i < transferList.size(); i++) {
-            Transfer transfer = transferList.get(i);
-            try {
-                traceOperation("SESSION_SET_AUTOCOMMIT", autoCommit ? 1 : 0);
-                transfer.writeInt(SessionRemote.SESSION_SET_AUTOCOMMIT).
-                        writeBoolean(autoCommit);
-                done(transfer);
-            } catch (IOException e) {
-                removeServer(e, i--, ++count);
+    private void setAutoCommitSend(boolean autoCommit) {
+        Lock sessionLock = sessionLock();
+        sessionLock.lock();
+        try {
+            for (int i = 0, count = 0; i < transferList.size(); i++) {
+                Transfer transfer = transferList.get(i);
+                try {
+                    traceOperation("SESSION_SET_AUTOCOMMIT", autoCommit ? 1 : 0);
+                    transfer.writeInt(SessionRemote.SESSION_SET_AUTOCOMMIT).
+                            writeBoolean(autoCommit);
+                    done(transfer);
+                } catch (IOException e) {
+                    removeServer(e, i--, ++count);
+                }
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 
@@ -475,9 +483,15 @@ public final class SessionRemote extends Session implements DataHandler {
     }
 
     @Override
-    public synchronized CommandInterface prepareCommand(String sql, int fetchSize) {
-        checkClosed();
-        return new CommandRemote(this, transferList, sql, fetchSize);
+    public CommandInterface prepareCommand(String sql, int fetchSize) {
+        Lock sessionLock = sessionLock();
+        sessionLock.lock();
+        try {
+            checkClosed();
+            return new CommandRemote(this, transferList, sql, fetchSize);
+        } finally {
+            sessionLock.unlock();
+        }
     }
 
     /**
@@ -548,7 +562,9 @@ public final class SessionRemote extends Session implements DataHandler {
     public void close() {
         RuntimeException closeError = null;
         if (transferList != null) {
-            synchronized (this) {
+            Lock sessionLock = sessionLock();
+            sessionLock.lock();
+            try {
                 for (Transfer transfer : transferList) {
                     try {
                         traceOperation("SESSION_CLOSE", 0);
@@ -562,6 +578,8 @@ public final class SessionRemote extends Session implements DataHandler {
                         trace.error(e, "close");
                     }
                 }
+            } finally {
+                sessionLock.unlock();
             }
             transferList = null;
         }
@@ -715,7 +733,7 @@ public final class SessionRemote extends Session implements DataHandler {
     }
 
     @Override
-    public Object getLobSyncObject() {
+    public Lock getLobSyncObject() {
         return lobSyncObject;
     }
 
@@ -745,30 +763,36 @@ public final class SessionRemote extends Session implements DataHandler {
     }
 
     @Override
-    public synchronized int readLob(long lobId, byte[] hmac, long offset,
+    public int readLob(long lobId, byte[] hmac, long offset,
             byte[] buff, int off, int length) {
-        checkClosed();
-        for (int i = 0, count = 0; i < transferList.size(); i++) {
-            Transfer transfer = transferList.get(i);
-            try {
-                traceOperation("LOB_READ", (int) lobId);
-                transfer.writeInt(SessionRemote.LOB_READ);
-                transfer.writeLong(lobId);
-                transfer.writeBytes(hmac);
-                transfer.writeLong(offset);
-                transfer.writeInt(length);
-                done(transfer);
-                length = transfer.readInt();
-                if (length <= 0) {
+        Lock sessionLock = sessionLock();
+        sessionLock.lock();
+        try {
+            checkClosed();
+            for (int i = 0, count = 0; i < transferList.size(); i++) {
+                Transfer transfer = transferList.get(i);
+                try {
+                    traceOperation("LOB_READ", (int) lobId);
+                    transfer.writeInt(SessionRemote.LOB_READ);
+                    transfer.writeLong(lobId);
+                    transfer.writeBytes(hmac);
+                    transfer.writeLong(offset);
+                    transfer.writeInt(length);
+                    done(transfer);
+                    length = transfer.readInt();
+                    if (length <= 0) {
+                        return length;
+                    }
+                    transfer.readBytes(buff, off, length);
                     return length;
+                } catch (IOException e) {
+                    removeServer(e, i--, ++count);
                 }
-                transfer.readBytes(buff, off, length);
-                return length;
-            } catch (IOException e) {
-                removeServer(e, i--, ++count);
             }
+            return 1;
+        } finally {
+            sessionLock.unlock();
         }
-        return 1;
     }
 
     @Override
@@ -799,24 +823,32 @@ public final class SessionRemote extends Session implements DataHandler {
     public String getCurrentSchemaName() {
         String schema = currentSchemaName;
         if (schema == null) {
-            synchronized (this) {
-                try (CommandInterface command = prepareCommand("CALL SCHEMA()", 1);
-                        ResultInterface result = command.executeQuery(1, false)) {
-                    result.next();
-                    currentSchemaName = schema = result.currentRow()[0].getString();
-                }
+            Lock sessionLock = sessionLock();
+            sessionLock.lock();
+            try (CommandInterface command = prepareCommand("CALL SCHEMA()", 1);
+                 ResultInterface result = command.executeQuery(1, false)) {
+                result.next();
+                currentSchemaName = schema = result.currentRow()[0].getString();
+            } finally {
+                sessionLock.unlock();
             }
         }
         return schema;
     }
 
     @Override
-    public synchronized void setCurrentSchemaName(String schema) {
-        currentSchemaName = null;
-        try (CommandInterface command = prepareCommand(
-                StringUtils.quoteIdentifier(new StringBuilder("SET SCHEMA "), schema).toString(), 0)) {
-            command.executeUpdate(null);
-            currentSchemaName = schema;
+    public void setCurrentSchemaName(String schema) {
+        Lock sessionLock = sessionLock();
+        sessionLock.lock();
+        try {
+            currentSchemaName = null;
+            try (CommandInterface command = prepareCommand(
+                    StringUtils.quoteIdentifier(new StringBuilder("SET SCHEMA "), schema).toString(), 0)) {
+                command.executeUpdate(null);
+                currentSchemaName = schema;
+            }
+        } finally {
+            sessionLock.unlock();
         }
     }
 

@@ -5,6 +5,8 @@
  */
 package org.h2.mvstore.db;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Database;
 import org.h2.expression.Expression;
 import org.h2.message.DbException;
@@ -38,6 +40,8 @@ class MVPlainTempResult extends MVTempResult {
      * Cursor for the {@link #next()} method.
      */
     private Cursor<Long, ValueRow> cursor;
+
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Creates a shallow copy of the result.
@@ -88,15 +92,20 @@ class MVPlainTempResult extends MVTempResult {
     }
 
     @Override
-    public synchronized ResultExternal createShallowCopy() {
-        if (parent != null) {
-            return parent.createShallowCopy();
+    public ResultExternal createShallowCopy() {
+        lock.lock();
+        try {
+            if (parent != null) {
+                return parent.createShallowCopy();
+            }
+            if (closed) {
+                return null;
+            }
+            childCount++;
+            return new MVPlainTempResult(this);
+        } finally {
+            lock.unlock();
         }
-        if (closed) {
-            return null;
-        }
-        childCount++;
-        return new MVPlainTempResult(this);
     }
 
     @Override

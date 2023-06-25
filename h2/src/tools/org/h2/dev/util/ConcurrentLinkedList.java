@@ -6,6 +6,8 @@
 package org.h2.dev.util;
 
 import java.util.Iterator;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A very simple linked list that supports concurrent access.
@@ -26,6 +28,8 @@ public class ConcurrentLinkedList<K> {
      */
     @SuppressWarnings("unchecked")
     volatile Entry<K> head = (Entry<K>) NULL;
+
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Get the first element, or null if none.
@@ -55,8 +59,13 @@ public class ConcurrentLinkedList<K> {
      *
      * @param obj the element
      */
-    public synchronized void add(K obj) {
-        head = Entry.append(head, obj);
+    public void add(K obj) {
+        lock.lock();
+        try {
+            head = Entry.append(head, obj);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -65,12 +74,17 @@ public class ConcurrentLinkedList<K> {
      * @param obj the element to remove
      * @return true if the element matched and was removed
      */
-    public synchronized boolean removeFirst(K obj) {
-        if (head.obj != obj) {
-            return false;
+    public boolean removeFirst(K obj) {
+        lock.lock();
+        try {
+            if (head.obj != obj) {
+                return false;
+            }
+            head = head.next;
+            return true;
+        } finally {
+            lock.unlock();
         }
-        head = head.next;
-        return true;
     }
 
     /**
@@ -79,12 +93,17 @@ public class ConcurrentLinkedList<K> {
      * @param obj the element to remove
      * @return true if the element matched and was removed
      */
-    public synchronized boolean removeLast(K obj) {
-        if (peekLast() != obj) {
-            return false;
+    public boolean removeLast(K obj) {
+        lock.lock();
+        try {
+            if (peekLast() != obj) {
+                return false;
+            }
+            head = Entry.removeLast(head);
+            return true;
+        } finally {
+            lock.unlock();
         }
-        head = Entry.removeLast(head);
-        return true;
     }
 
     /**

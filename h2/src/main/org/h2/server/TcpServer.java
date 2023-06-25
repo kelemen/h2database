@@ -18,6 +18,8 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.jdbc.JdbcConnection;
@@ -37,6 +39,7 @@ import org.h2.util.Utils10;
  * the same database over the network.
  */
 public class TcpServer implements Service {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private static final int SHUTDOWN_NORMAL = 0;
     private static final int SHUTDOWN_FORCE = 1;
@@ -56,8 +59,7 @@ public class TcpServer implements Service {
     private boolean stop;
     private ShutdownHandler shutdownHandler;
     private ServerSocket serverSocket;
-    private final Set<TcpServerThread> running =
-            Collections.synchronizedSet(new HashSet<TcpServerThread>());
+    private final Set<TcpServerThread> running = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private String baseDir;
     private boolean allowOthers;
     private boolean isDaemon;
@@ -69,6 +71,7 @@ public class TcpServer implements Service {
     private Thread listenerThread;
     private int nextThreadId;
     private String key, keyDatabase;
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Get the database name of the management database.
@@ -123,14 +126,19 @@ public class TcpServer implements Service {
      * @param url the database URL
      * @param user the user name
      */
-    synchronized void addConnection(int id, String url, String user) {
+    void addConnection(int id, String url, String user) {
+        lock.lock();
         try {
-            managementDbAdd.setInt(1, id);
-            managementDbAdd.setString(2, url);
-            managementDbAdd.setString(3, user);
-            managementDbAdd.execute();
-        } catch (SQLException e) {
-            DbException.traceThrowable(e);
+            try {
+                managementDbAdd.setInt(1, id);
+                managementDbAdd.setString(2, url);
+                managementDbAdd.setString(3, user);
+                managementDbAdd.execute();
+            } catch (SQLException e) {
+                DbException.traceThrowable(e);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -139,23 +147,33 @@ public class TcpServer implements Service {
      *
      * @param id the connection id
      */
-    synchronized void removeConnection(int id) {
+    void removeConnection(int id) {
+        lock.lock();
         try {
-            managementDbRemove.setInt(1, id);
-            managementDbRemove.execute();
-        } catch (SQLException e) {
-            DbException.traceThrowable(e);
-        }
-    }
-
-    private synchronized void stopManagementDb() {
-        if (managementDb != null) {
             try {
-                managementDb.close();
+                managementDbRemove.setInt(1, id);
+                managementDbRemove.execute();
             } catch (SQLException e) {
                 DbException.traceThrowable(e);
             }
-            managementDb = null;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void stopManagementDb() {
+        lock.lock();
+        try {
+            if (managementDb != null) {
+                try {
+                    managementDb.close();
+                } catch (SQLException e) {
+                    DbException.traceThrowable(e);
+                }
+                managementDb = null;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -230,19 +248,24 @@ public class TcpServer implements Service {
     }
 
     @Override
-    public synchronized void start() throws SQLException {
-        stop = false;
+    public void start() throws SQLException {
+        lock.lock();
         try {
-            serverSocket = NetUtils.createServerSocket(port, ssl);
-        } catch (DbException e) {
-            if (!portIsSet) {
-                serverSocket = NetUtils.createServerSocket(0, ssl);
-            } else {
-                throw e;
+            stop = false;
+            try {
+                serverSocket = NetUtils.createServerSocket(port, ssl);
+            } catch (DbException e) {
+                if (!portIsSet) {
+                    serverSocket = NetUtils.createServerSocket(0, ssl);
+                } else {
+                    throw e;
+                }
             }
+            port = serverSocket.getLocalPort();
+            initManagementDb();
+        } finally {
+            lock.unlock();
         }
-        port = serverSocket.getLocalPort();
-        initManagementDb();
     }
 
     @Override
@@ -271,19 +294,24 @@ public class TcpServer implements Service {
     }
 
     @Override
-    public synchronized boolean isRunning(boolean traceError) {
-        if (serverSocket == null) {
-            return false;
-        }
+    public boolean isRunning(boolean traceError) {
+        lock.lock();
         try {
-            Socket s = NetUtils.createLoopbackSocket(port, ssl);
-            s.close();
-            return true;
-        } catch (Exception e) {
-            if (traceError) {
-                traceError(e);
+            if (serverSocket == null) {
+                return false;
             }
-            return false;
+            try {
+                Socket s = NetUtils.createLoopbackSocket(port, ssl);
+                s.close();
+                return true;
+            } catch (Exception e) {
+                if (traceError) {
+                    traceError(e);
+                }
+                return false;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -434,44 +462,49 @@ public class TcpServer implements Service {
      *            stopped
      * @throws SQLException on failure
      */
-    public static synchronized void shutdown(String url, String password,
+    public static void shutdown(String url, String password,
             boolean force, boolean all) throws SQLException {
+        CLASS_LOCK.lock();
         try {
-            int port = Constants.DEFAULT_TCP_PORT;
-            int idx = url.lastIndexOf(':');
-            if (idx >= 0) {
-                String p = url.substring(idx + 1);
-                if (StringUtils.isNumber(p)) {
-                    port = Integer.decode(p);
+            try {
+                int port = Constants.DEFAULT_TCP_PORT;
+                int idx = url.lastIndexOf(':');
+                if (idx >= 0) {
+                    String p = url.substring(idx + 1);
+                    if (StringUtils.isNumber(p)) {
+                        port = Integer.decode(p);
+                    }
                 }
-            }
-            String db = getManagementDbName(port);
-            for (int i = 0; i < 2; i++) {
-                try (JdbcConnection conn = new JdbcConnection("jdbc:h2:" + url + '/' + db, null, "", password, true)) {
-                    PreparedStatement prep = conn.prepareStatement("CALL STOP_SERVER(?, ?, ?)");
-                    prep.setInt(1, all ? 0 : port);
-                    prep.setString(2, password);
-                    prep.setInt(3, force ? SHUTDOWN_FORCE : SHUTDOWN_NORMAL);
-                    try {
-                        prep.execute();
-                    } catch (SQLException e) {
-                        if (force) {
-                            // ignore
-                        } else {
-                            if (e.getErrorCode() != ErrorCode.CONNECTION_BROKEN_1) {
-                                throw e;
+                String db = getManagementDbName(port);
+                for (int i = 0; i < 2; i++) {
+                    try (JdbcConnection conn = new JdbcConnection("jdbc:h2:" + url + '/' + db, null, "", password, true)) {
+                        PreparedStatement prep = conn.prepareStatement("CALL STOP_SERVER(?, ?, ?)");
+                        prep.setInt(1, all ? 0 : port);
+                        prep.setString(2, password);
+                        prep.setInt(3, force ? SHUTDOWN_FORCE : SHUTDOWN_NORMAL);
+                        try {
+                            prep.execute();
+                        } catch (SQLException e) {
+                            if (force) {
+                                // ignore
+                            } else {
+                                if (e.getErrorCode() != ErrorCode.CONNECTION_BROKEN_1) {
+                                    throw e;
+                                }
                             }
                         }
-                    }
-                    break;
-                } catch (SQLException e) {
-                    if (i == 1) {
-                        throw e;
+                        break;
+                    } catch (SQLException e) {
+                        if (i == 1) {
+                            throw e;
+                        }
                     }
                 }
+            } catch (Exception e) {
+                throw DbException.toSQLException(e);
             }
-        } catch (Exception e) {
-            throw DbException.toSQLException(e);
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 

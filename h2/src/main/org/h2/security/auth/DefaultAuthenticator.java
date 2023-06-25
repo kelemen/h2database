@@ -14,6 +14,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.xml.parsers.ParserConfigurationException;
 import org.h2.api.CredentialsValidator;
 import org.h2.api.UserToRolesMapper;
@@ -53,6 +55,7 @@ public class DefaultAuthenticator implements Authenticator {
 
     public static final String DEFAULT_REALMNAME = "H2";
 
+    private final Lock lock = new ReentrantLock();
     private Map<String, CredentialsValidator> realms = new HashMap<>();
     private List<UserToRolesMapper> userToRolesMappers = new ArrayList<>();
     private boolean allowUserRegistration;
@@ -197,7 +200,8 @@ public class DefaultAuthenticator implements Authenticator {
         if (initialized) {
             return;
         }
-        synchronized (this) {
+        lock.lock();
+        try {
             if (initialized) {
                 return;
             }
@@ -227,6 +231,8 @@ public class DefaultAuthenticator implements Authenticator {
                         "Failed to configure authentication from " + h2AuthenticatorConfigurationUrl, e);
             }
             initialized = true;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -311,11 +317,14 @@ public class DefaultAuthenticator implements Authenticator {
             }
             Role currentRole = database.findRole(currentRoleName);
             if (currentRole == null && isCreateMissingRoles()) {
-                synchronized (database.getSystemSession()) {
+                lock.lock();
+                try {
                     currentRole = new Role(database, database.allocateObjectId(), currentRoleName, false);
                     database.addDatabaseObject(database.getSystemSession(), currentRole);
                     database.getSystemSession().commit(false);
                     updatedDb = true;
+                } finally {
+                    lock.unlock();
                 }
             }
             if (currentRole == null) {
@@ -351,10 +360,14 @@ public class DefaultAuthenticator implements Authenticator {
             throw new AuthenticationException(e);
         }
         if (user == null) {
-            synchronized (database.getSystemSession()) {
+            Lock sessionLock = database.getSystemSession().sessionLock();
+            sessionLock.lock();
+            try {
                 user = UserBuilder.buildUser(authenticationInfo, database, isPersistUsers());
                 database.addDatabaseObject(database.getSystemSession(), user);
                 database.getSystemSession().commit(false);
+            } finally {
+                sessionLock.unlock();
             }
         }
         user.revokeTemporaryRightsOnRoles();

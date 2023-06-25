@@ -17,6 +17,8 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.server.Service;
 import org.h2.store.fs.FileUtils;
 import org.h2.tools.Server;
@@ -72,10 +74,13 @@ public class FtpServer extends Tool implements Service {
 
     private final SimpleDateFormat dateFormatNew = new SimpleDateFormat(
             "MMM dd HH:mm", Locale.ENGLISH);
+    private final Lock dateFormatNewLock = new ReentrantLock();
     private final SimpleDateFormat dateFormatOld = new SimpleDateFormat(
             "MMM dd  yyyy", Locale.ENGLISH);
+    private final Lock dateFormatOldLock = new ReentrantLock();
     private final SimpleDateFormat dateFormat = new SimpleDateFormat(
             "yyyyMMddHHmmss");
+    private final Lock dateFormatLock = new ReentrantLock();
 
     private String root = DEFAULT_ROOT;
     private String writeUserName = DEFAULT_WRITE,
@@ -88,6 +93,7 @@ public class FtpServer extends Tool implements Service {
 
     private FtpEventListener eventListener;
 
+    private final Lock lock = new ReentrantLock();
 
     /**
      * When running without options, -tcp, -web, -browser,
@@ -195,9 +201,12 @@ public class FtpServer extends Tool implements Service {
             while (serverSocket != null) {
                 Socket s = serverSocket.accept();
                 boolean stop;
-                synchronized (this) {
+                lock.lock();
+                try {
                     openConnectionCount++;
                     stop = openConnectionCount > MAX_CONNECTION_COUNT;
+                } finally {
+                    lock.unlock();
                 }
                 FtpControl c = new FtpControl(s, this, stop);
                 c.start();
@@ -211,8 +220,11 @@ public class FtpServer extends Tool implements Service {
      * Close a connection. The open connection count will be decremented.
      */
     void closeConnection() {
-        synchronized (this) {
+        lock.lock();
+        try {
             openConnectionCount--;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -241,12 +253,18 @@ public class FtpServer extends Tool implements Service {
         if (mod.after(now)
                 || Math.abs((now.getTime() - mod.getTime()) /
                         1000 / 60 / 60 / 24) > 180) {
-            synchronized (dateFormatOld) {
+            dateFormatOldLock.lock();
+            try {
                 date = dateFormatOld.format(mod);
+            } finally {
+                dateFormatOldLock.unlock();
             }
         } else {
-            synchronized (dateFormatNew) {
+            dateFormatNewLock.lock();
+            try {
                 date = dateFormatNew.format(mod);
+            } finally {
+                dateFormatNewLock.unlock();
             }
         }
         buff.append(date);
@@ -263,8 +281,11 @@ public class FtpServer extends Tool implements Service {
      * @return the last modified date of this file
      */
     String formatLastModified(String fileName) {
-        synchronized (dateFormat) {
+        dateFormatLock.lock();
+        try {
             return dateFormat.format(new Date(FileUtils.lastModified(fileName)));
+        } finally {
+            dateFormatLock.unlock();
         }
     }
 

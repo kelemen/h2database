@@ -10,7 +10,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.IsolationLevel;
 import org.h2.mvstore.DataUtils;
 import org.h2.mvstore.MVMap;
@@ -175,6 +179,8 @@ public final class Transaction {
      */
     final IsolationLevel isolationLevel;
 
+    private final Lock transactionLock = new ReentrantLock();
+    private final Condition transactionLockCondition = transactionLock.newCondition();
 
     Transaction(TransactionStore store, int transactionId, long sequenceNum, int status,
                 String name, long logId, int timeoutMillis, int ownerId,
@@ -651,8 +657,11 @@ public final class Transaction {
 
     private void notifyAllWaitingTransactions() {
         if (notificationRequested) {
-            synchronized (this) {
-                notifyAll();
+            transactionLock.lock();
+            try {
+                transactionLockCondition.signalAll();
+            } finally {
+                transactionLock.unlock();
             }
         }
     }
@@ -727,27 +736,32 @@ public final class Transaction {
         }
     }
 
-    private synchronized boolean waitForThisToEnd(int millis, Transaction waiter) {
-        long until = System.currentTimeMillis() + millis;
-        notificationRequested = true;
-        long state;
-        int status;
-        while((status = getStatus(state = statusAndLogId.get())) != STATUS_CLOSED
-                && status != STATUS_ROLLED_BACK && !hasRollback(state)) {
-            if (waiter.getStatus() != STATUS_OPEN) {
-                waiter.tryThrowDeadLockException(true);
+    private boolean waitForThisToEnd(int millis, Transaction waiter) {
+        transactionLock.lock();
+        try {
+            long until = System.currentTimeMillis() + millis;
+            notificationRequested = true;
+            long state;
+            int status;
+            while((status = getStatus(state = statusAndLogId.get())) != STATUS_CLOSED
+                    && status != STATUS_ROLLED_BACK && !hasRollback(state)) {
+                if (waiter.getStatus() != STATUS_OPEN) {
+                    waiter.tryThrowDeadLockException(true);
+                }
+                long dur = until - System.currentTimeMillis();
+                if(dur <= 0) {
+                    return false;
+                }
+                try {
+                    transactionLockCondition.await(dur, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ex) {
+                    return false;
+                }
             }
-            long dur = until - System.currentTimeMillis();
-            if(dur <= 0) {
-                return false;
-            }
-            try {
-                wait(dur);
-            } catch (InterruptedException ex) {
-                return false;
-            }
+            return true;
+        } finally {
+            transactionLock.unlock();
         }
-        return true;
     }
 
     /**

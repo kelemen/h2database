@@ -37,6 +37,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
@@ -3370,8 +3372,12 @@ public class MVStore implements AutoCloseable {
             if (backgroundWriterThread.compareAndSet(t, null)) {
                 // if called from within the thread itself - can not join
                 if (t != Thread.currentThread()) {
-                    synchronized (t.sync) {
-                        t.sync.notifyAll();
+                    Lock sync = t.sync;
+                    sync.lock();
+                    try {
+                        t.syncCondition.signalAll();
+                    } finally {
+                        sync.unlock();
                     }
 
                     if (waitForIt) {
@@ -3749,7 +3755,8 @@ public class MVStore implements AutoCloseable {
      */
     private static class BackgroundWriterThread extends Thread {
 
-        public final Object sync = new Object();
+        public final Lock sync = new ReentrantLock();
+        public final Condition syncCondition = sync.newCondition();
         private final MVStore store;
         private final int sleep;
 
@@ -3763,11 +3770,14 @@ public class MVStore implements AutoCloseable {
         @Override
         public void run() {
             while (store.isBackgroundThread()) {
-                synchronized (sync) {
+                sync.lock();
+                try {
                     try {
-                        sync.wait(sleep);
+                        syncCondition.await(sleep, TimeUnit.MILLISECONDS);
                     } catch (InterruptedException ignore) {
                     }
+                } finally {
+                    sync.unlock();
                 }
                 if (!store.isBackgroundThread()) {
                     break;

@@ -13,6 +13,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.ArrayList;
 import java.util.Random;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBaseDefault;
 import org.h2.store.fs.FilePath;
 import org.h2.store.fs.FilePathWrapper;
@@ -166,6 +168,8 @@ class FileReorderWrites extends FileBaseDefault {
 
     private boolean closed;
 
+    private final Lock lock = new ReentrantLock();
+
     /**
      * The list of not yet applied to the base channel. It is sorted by time.
      */
@@ -275,9 +279,14 @@ class FileReorderWrites extends FileBaseDefault {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
-        return readBase.tryLock(position, size, shared);
+        lock.lock();
+        try {
+            return readBase.tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

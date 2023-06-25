@@ -5,6 +5,8 @@
  */
 package org.h2.schema;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.ddl.SequenceOptions;
 import org.h2.engine.DbObject;
@@ -71,6 +73,7 @@ public final class Sequence extends SchemaObject {
     private Cycle cycle;
     private boolean belongsToTable;
     private boolean writeWithMargin;
+    private final Lock lock;
 
     /**
      * Creates a new sequence.
@@ -92,6 +95,7 @@ public final class Sequence extends SchemaObject {
     public Sequence(SessionLocal session, Schema schema, int id, String name, SequenceOptions options,
             boolean belongsToTable) {
         super(schema, id, name, Trace.SEQUENCE);
+        lock = new ReentrantLock();
         dataType = options.getDataType();
         if (dataType == null) {
             options.setDataType(dataType = session.getMode().decimalSequences ? TypeInfo.TYPE_NUMERIC_BIGINT
@@ -135,6 +139,10 @@ public final class Sequence extends SchemaObject {
         this.belongsToTable = belongsToTable;
     }
 
+    public Lock sequenceLock() {
+        return lock;
+    }
+
     /**
      * Allows the base value, start value, min value, max value, increment and
      * cache size to be updated atomically, including atomic validation. Useful
@@ -156,39 +164,44 @@ public final class Sequence extends SchemaObject {
      * @param cacheSize
      *            the new cache size ({@code null} if no change)
      */
-    public synchronized void modify(Long baseValue, Long startValue, Long minValue, Long maxValue, Long increment,
+    public void modify(Long baseValue, Long startValue, Long minValue, Long maxValue, Long increment,
             Cycle cycle, Long cacheSize) {
-        long baseValueAsLong = baseValue != null ? baseValue : this.baseValue;
-        long startValueAsLong = startValue != null ? startValue : this.startValue;
-        long minValueAsLong = minValue != null ? minValue : this.minValue;
-        long maxValueAsLong = maxValue != null ? maxValue : this.maxValue;
-        long incrementAsLong = increment != null ? increment : this.increment;
-        long cacheSizeAsLong;
-        boolean mayAdjustCacheSize;
-        if (cacheSize != null) {
-            cacheSizeAsLong = cacheSize;
-            mayAdjustCacheSize = false;
-        } else {
-            cacheSizeAsLong = this.cacheSize;
-            mayAdjustCacheSize = true;
-        }
-        cacheSizeAsLong = checkOptions(baseValueAsLong, startValueAsLong, minValueAsLong, maxValueAsLong,
-                incrementAsLong, cacheSizeAsLong, mayAdjustCacheSize);
-        if (cycle == null) {
-            cycle = this.cycle;
-            if (cycle == Cycle.EXHAUSTED && baseValue != null) {
-                cycle = Cycle.NO_CYCLE;
+        lock.lock();
+        try {
+            long baseValueAsLong = baseValue != null ? baseValue : this.baseValue;
+            long startValueAsLong = startValue != null ? startValue : this.startValue;
+            long minValueAsLong = minValue != null ? minValue : this.minValue;
+            long maxValueAsLong = maxValue != null ? maxValue : this.maxValue;
+            long incrementAsLong = increment != null ? increment : this.increment;
+            long cacheSizeAsLong;
+            boolean mayAdjustCacheSize;
+            if (cacheSize != null) {
+                cacheSizeAsLong = cacheSize;
+                mayAdjustCacheSize = false;
+            } else {
+                cacheSizeAsLong = this.cacheSize;
+                mayAdjustCacheSize = true;
             }
-        } else if (cycle == Cycle.EXHAUSTED) {
-            baseValueAsLong = startValueAsLong;
+            cacheSizeAsLong = checkOptions(baseValueAsLong, startValueAsLong, minValueAsLong, maxValueAsLong,
+                    incrementAsLong, cacheSizeAsLong, mayAdjustCacheSize);
+            if (cycle == null) {
+                cycle = this.cycle;
+                if (cycle == Cycle.EXHAUSTED && baseValue != null) {
+                    cycle = Cycle.NO_CYCLE;
+                }
+            } else if (cycle == Cycle.EXHAUSTED) {
+                baseValueAsLong = startValueAsLong;
+            }
+            this.margin = this.baseValue = baseValueAsLong;
+            this.startValue = startValueAsLong;
+            this.minValue = minValueAsLong;
+            this.maxValue = maxValueAsLong;
+            this.increment = incrementAsLong;
+            this.cacheSize = cacheSizeAsLong;
+            this.cycle = cycle;
+        } finally {
+            lock.unlock();
         }
-        this.margin = this.baseValue = baseValueAsLong;
-        this.startValue = startValueAsLong;
-        this.minValue = minValueAsLong;
-        this.maxValue = maxValueAsLong;
-        this.increment = incrementAsLong;
-        this.cacheSize = cacheSizeAsLong;
-        this.cycle = cycle;
     }
 
     /**
@@ -356,8 +369,11 @@ public final class Sequence extends SchemaObject {
             dataType.getSQL(builder.append(" AS "), DEFAULT_SQL_FLAGS);
         }
         builder.append(' ');
-        synchronized (this) {
+        lock.lock();
+        try {
             getSequenceOptionsSQL(builder, writeWithMargin ? margin : baseValue);
+        } finally {
+            lock.unlock();
         }
         if (belongsToTable) {
             builder.append(" BELONGS_TO_TABLE");
@@ -371,8 +387,13 @@ public final class Sequence extends SchemaObject {
      * @param builder the builder
      * @return the builder
      */
-    public synchronized StringBuilder getSequenceOptionsSQL(StringBuilder builder) {
-        return getSequenceOptionsSQL(builder, baseValue);
+    public StringBuilder getSequenceOptionsSQL(StringBuilder builder) {
+        lock.lock();
+        try {
+            return getSequenceOptionsSQL(builder, baseValue);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private StringBuilder getSequenceOptionsSQL(StringBuilder builder, long value) {
@@ -416,13 +437,16 @@ public final class Sequence extends SchemaObject {
     public Value getNext(SessionLocal session) {
         long result;
         boolean needsFlush;
-        synchronized (this) {
+        lock.lock();
+        try {
             if (cycle == Cycle.EXHAUSTED) {
                 throw DbException.get(ErrorCode.SEQUENCE_EXHAUSTED, getName());
             }
             result = baseValue;
             long newBase = result + increment;
             needsFlush = increment > 0 ? increment(result, newBase) : decrement(result, newBase);
+        } finally {
+            lock.unlock();
         }
         if (needsFlush) {
             flush(session);
@@ -516,13 +540,21 @@ public final class Sequence extends SchemaObject {
             // locked it) because it must be committed immediately, otherwise
             // other threads can not access the sys table.
             SessionLocal sysSession = database.getSystemSession();
-            synchronized (sysSession) {
+            Lock sessionLock = sysSession.sessionLock();
+            sessionLock.lock();
+            try {
                 flushInternal(sysSession);
                 sysSession.commit(false);
+            } finally {
+                sessionLock.unlock();
             }
         } else {
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 flushInternal(session);
+            } finally {
+                sessionLock.unlock();
             }
         }
     }
@@ -559,13 +591,23 @@ public final class Sequence extends SchemaObject {
         invalidate();
     }
 
-    public synchronized long getBaseValue() {
-        // Use synchronized because baseValue is not volatile
-        return baseValue;
+    public long getBaseValue() {
+        lock.lock();
+        try {
+            // Use synchronized because baseValue is not volatile
+            return baseValue;
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized long getCurrentValue() {
-        return baseValue - increment;
+    public long getCurrentValue() {
+        lock.lock();
+        try {
+            return baseValue - increment;
+        } finally {
+            lock.unlock();
+        }
     }
 
     public void setBelongsToTable(boolean b) {

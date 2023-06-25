@@ -14,6 +14,8 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A facility to store streams in a map. Streams are split into blocks, which
@@ -42,6 +44,7 @@ public class StreamStore {
     private final AtomicLong nextKey = new AtomicLong();
     private final AtomicReference<byte[]> nextBuffer =
             new AtomicReference<>();
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Create a stream store instance.
@@ -221,7 +224,8 @@ public class StreamStore {
             return key;
         }
         // search the next free id using binary search
-        synchronized (this) {
+        lock.lock();
+        try {
             long low = key, high = Long.MAX_VALUE;
             while (low < high) {
                 long x = (low + high) >>> 1;
@@ -234,6 +238,8 @@ public class StreamStore {
             key = low;
             nextKey.set(key + 1);
             return key;
+        } finally {
+            lock.unlock();
         }
     }
 

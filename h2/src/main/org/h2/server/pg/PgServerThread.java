@@ -25,6 +25,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 import org.h2.api.ErrorCode;
@@ -122,6 +124,8 @@ public final class PgServerThread implements Runnable {
             new CaseInsensitiveMap<>();
     private final HashMap<String, Portal> portals =
             new CaseInsensitiveMap<>();
+
+    private final Lock lock = new ReentrantLock();
 
     PgServerThread(Socket socket, PgServer server) {
         this.server = server;
@@ -1295,17 +1299,27 @@ public final class PgServerThread implements Runnable {
         return this.processId;
     }
 
-    private synchronized void setActiveRequest(CommandInterface statement) {
-        activeRequest = statement;
+    private void setActiveRequest(CommandInterface statement) {
+        lock.lock();
+        try {
+            activeRequest = statement;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
      * Kill a currently running query on this thread.
      */
-    private synchronized void cancelRequest() {
-        if (activeRequest != null) {
-            activeRequest.cancel();
-            activeRequest = null;
+    private void cancelRequest() {
+        lock.lock();
+        try {
+            if (activeRequest != null) {
+                activeRequest.cancel();
+                activeRequest = null;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 

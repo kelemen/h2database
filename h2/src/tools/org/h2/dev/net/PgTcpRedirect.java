@@ -14,6 +14,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * This class helps debug the PostgreSQL network protocol.
@@ -22,6 +24,7 @@ import java.net.Socket;
 public class PgTcpRedirect {
 
     private static final boolean DEBUG = false;
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     /**
      * This method is called when executing this application from the command
@@ -542,18 +545,23 @@ public class PgTcpRedirect {
      * @param buffer the byte array
      * @param len the length
      */
-    static synchronized void printData(byte[] buffer, int len) {
-        if (DEBUG) {
-            System.out.print(" ");
-            for (int i = 0; i < len; i++) {
-                int c = buffer[i] & 255;
-                if (c >= ' ' && c <= 127 && c != '[' & c != ']') {
-                    System.out.print((char) c);
-                } else {
-                    System.out.print("[" + Integer.toHexString(c) + "]");
+    static void printData(byte[] buffer, int len) {
+        CLASS_LOCK.lock();
+        try {
+            if (DEBUG) {
+                System.out.print(" ");
+                for (int i = 0; i < len; i++) {
+                    int c = buffer[i] & 255;
+                    if (c >= ' ' && c <= 127 && c != '[' & c != ']') {
+                        System.out.print((char) c);
+                    } else {
+                        System.out.print("[" + Integer.toHexString(c) + "]");
+                    }
                 }
+                System.out.println();
             }
-            System.out.println();
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 }

@@ -10,6 +10,8 @@ import java.sql.DriverManager;
 import java.sql.DriverPropertyInfo;
 import java.sql.SQLException;
 import java.util.Properties;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
@@ -29,7 +31,7 @@ import org.h2.message.DbException;
  * </pre>
  */
 public class Driver implements java.sql.Driver, JdbcDriverBackwardsCompat {
-
+    private static final Lock CLASS_LOCK = new ReentrantLock();
     private static final Driver INSTANCE = new Driver();
     private static final String DEFAULT_URL = "jdbc:default:connection";
     private static final ThreadLocal<Connection> DEFAULT_CONNECTION =
@@ -143,7 +145,8 @@ public class Driver implements java.sql.Driver, JdbcDriverBackwardsCompat {
      * INTERNAL
      * @return instance of the driver registered with the DriverManager
      */
-    public static synchronized Driver load() {
+    public static Driver load() {
+        CLASS_LOCK.lock();
         try {
             if (!registered) {
                 registered = true;
@@ -151,6 +154,8 @@ public class Driver implements java.sql.Driver, JdbcDriverBackwardsCompat {
             }
         } catch (SQLException e) {
             DbException.traceThrowable(e);
+        } finally {
+            CLASS_LOCK.unlock();
         }
         return INSTANCE;
     }
@@ -158,7 +163,8 @@ public class Driver implements java.sql.Driver, JdbcDriverBackwardsCompat {
     /**
      * INTERNAL
      */
-    public static synchronized void unload() {
+    public static void unload() {
+        CLASS_LOCK.lock();
         try {
             if (registered) {
                 registered = false;
@@ -166,6 +172,8 @@ public class Driver implements java.sql.Driver, JdbcDriverBackwardsCompat {
             }
         } catch (SQLException e) {
             DbException.traceThrowable(e);
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 

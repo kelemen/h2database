@@ -11,6 +11,8 @@ import java.io.PrintWriter;
 import java.sql.SQLException;
 import java.util.HashSet;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.ConnectionInfo;
 import org.h2.engine.Constants;
@@ -32,6 +34,7 @@ import org.h2.util.Utils;
 public class RecoverTester implements Recorder {
 
     private static final RecoverTester instance = new RecoverTester();
+    private static final Lock classLock = new ReentrantLock();
 
     private String testDatabase = "memFS:reopen";
     private int writeCount = Utils.getProperty("h2.recoverTestOffset", 0);
@@ -47,11 +50,16 @@ public class RecoverTester implements Recorder {
      *
      * @param recoverTest the value of the recover test parameter
      */
-    public static synchronized void init(String recoverTest) {
-        if (StringUtils.isNumber(recoverTest)) {
-            instance.setTestEvery(Integer.parseInt(recoverTest));
+    public static void init(String recoverTest) {
+        classLock.lock();
+        try {
+            if (StringUtils.isNumber(recoverTest)) {
+                instance.setTestEvery(Integer.parseInt(recoverTest));
+            }
+            FilePathRec.setRecorder(instance);
+        } finally {
+            classLock.unlock();
         }
-        FilePathRec.setRecorder(instance);
     }
 
     @Override
@@ -89,83 +97,88 @@ public class RecoverTester implements Recorder {
         }
     }
 
-    private synchronized void testDatabase(String fileName, PrintWriter out) {
-        out.println("+ write #" + writeCount + " verify #" + verifyCount);
+    private void testDatabase(String fileName, PrintWriter out) {
+        classLock.lock();
         try {
-            IOUtils.copyFiles(fileName, testDatabase + Constants.SUFFIX_MV_FILE);
-            verifyCount++;
-            // avoid using the Engine class to avoid deadlocks
-            ConnectionInfo ci = new ConnectionInfo("jdbc:h2:" + testDatabase +
-                    ";FILE_LOCK=NO;TRACE_LEVEL_FILE=0", null, "", "");
-            Database database = new Database(ci, null);
-            // close the database
-            SessionLocal sysSession = database.getSystemSession();
-            sysSession.prepare("script to '" + testDatabase + ".sql'").query(0);
-            sysSession.prepare("shutdown immediately").update();
-            database.removeSession(null);
-            // everything OK - return
-            return;
-        } catch (DbException e) {
-            SQLException e2 = DbException.toSQLException(e);
-            int errorCode = e2.getErrorCode();
-            if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
+            out.println("+ write #" + writeCount + " verify #" + verifyCount);
+            try {
+                IOUtils.copyFiles(fileName, testDatabase + Constants.SUFFIX_MV_FILE);
+                verifyCount++;
+                // avoid using the Engine class to avoid deadlocks
+                ConnectionInfo ci = new ConnectionInfo("jdbc:h2:" + testDatabase +
+                        ";FILE_LOCK=NO;TRACE_LEVEL_FILE=0", null, "", "");
+                Database database = new Database(ci, null);
+                // close the database
+                SessionLocal sysSession = database.getSystemSession();
+                sysSession.prepare("script to '" + testDatabase + ".sql'").query(0);
+                sysSession.prepare("shutdown immediately").update();
+                database.removeSession(null);
+                // everything OK - return
                 return;
-            } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
-                return;
-            }
-            e.printStackTrace(System.out);
-        } catch (Exception e) {
-            // failed
-            int errorCode = 0;
-            if (e instanceof SQLException) {
-                errorCode = ((SQLException) e).getErrorCode();
-            }
-            if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
-                return;
-            } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
-                return;
-            }
-            e.printStackTrace(System.out);
-        }
-        out.println("begin ------------------------------ " + writeCount);
-        try {
-            Recover.execute(fileName.substring(0, fileName.lastIndexOf('/')), null);
-        } catch (SQLException e) {
-            // ignore
-        }
-        testDatabase += "X";
-        try {
-            IOUtils.copyFiles(fileName, testDatabase + Constants.SUFFIX_MV_FILE);
-            // avoid using the Engine class to avoid deadlocks
-            ConnectionInfo ci = new ConnectionInfo("jdbc:h2:" +
-                        testDatabase + ";FILE_LOCK=NO", null, null, null);
-            Database database = new Database(ci, null);
-            // close the database
-            database.removeSession(null);
-        } catch (Exception e) {
-            int errorCode = 0;
-            if (e instanceof DbException) {
-                e = ((DbException) e).getSQLException();
-                errorCode = ((SQLException) e).getErrorCode();
-            }
-            if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
-                return;
-            } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
-                return;
-            }
-            StringBuilder buff = new StringBuilder();
-            StackTraceElement[] list = e.getStackTrace();
-            for (int i = 0; i < 10 && i < list.length; i++) {
-                buff.append(list[i].toString()).append('\n');
-            }
-            String s = buff.toString();
-            if (!knownErrors.contains(s)) {
-                out.println(writeCount + " code: " + errorCode + " " + e.toString());
+            } catch (DbException e) {
+                SQLException e2 = DbException.toSQLException(e);
+                int errorCode = e2.getErrorCode();
+                if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
+                    return;
+                } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
+                    return;
+                }
                 e.printStackTrace(System.out);
-                knownErrors.add(s);
-            } else {
-                out.println(writeCount + " code: " + errorCode);
+            } catch (Exception e) {
+                // failed
+                int errorCode = 0;
+                if (e instanceof SQLException) {
+                    errorCode = ((SQLException) e).getErrorCode();
+                }
+                if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
+                    return;
+                } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
+                    return;
+                }
+                e.printStackTrace(System.out);
             }
+            out.println("begin ------------------------------ " + writeCount);
+            try {
+                Recover.execute(fileName.substring(0, fileName.lastIndexOf('/')), null);
+            } catch (SQLException e) {
+                // ignore
+            }
+            testDatabase += "X";
+            try {
+                IOUtils.copyFiles(fileName, testDatabase + Constants.SUFFIX_MV_FILE);
+                // avoid using the Engine class to avoid deadlocks
+                ConnectionInfo ci = new ConnectionInfo("jdbc:h2:" +
+                        testDatabase + ";FILE_LOCK=NO", null, null, null);
+                Database database = new Database(ci, null);
+                // close the database
+                database.removeSession(null);
+            } catch (Exception e) {
+                int errorCode = 0;
+                if (e instanceof DbException) {
+                    e = ((DbException) e).getSQLException();
+                    errorCode = ((SQLException) e).getErrorCode();
+                }
+                if (errorCode == ErrorCode.WRONG_USER_OR_PASSWORD) {
+                    return;
+                } else if (errorCode == ErrorCode.FILE_ENCRYPTION_ERROR_1) {
+                    return;
+                }
+                StringBuilder buff = new StringBuilder();
+                StackTraceElement[] list = e.getStackTrace();
+                for (int i = 0; i < 10 && i < list.length; i++) {
+                    buff.append(list[i].toString()).append('\n');
+                }
+                String s = buff.toString();
+                if (!knownErrors.contains(s)) {
+                    out.println(writeCount + " code: " + errorCode + " " + e.toString());
+                    e.printStackTrace(System.out);
+                    knownErrors.add(s);
+                } else {
+                    out.println(writeCount + " code: " + errorCode);
+                }
+            }
+        } finally {
+            classLock.unlock();
         }
     }
 

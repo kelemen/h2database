@@ -13,6 +13,8 @@ import java.sql.Driver;
 import java.sql.DriverManager;
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.test.TestBase;
 
 /**
@@ -97,31 +99,38 @@ public class TestClassLoaderLeak extends TestBase {
      * The application class loader.
      */
     private static class TestClassLoader extends URLClassLoader {
+        private final Lock lock;
 
         public TestClassLoader() {
             super(((URLClassLoader) TestClassLoader.class.getClassLoader())
                     .getURLs(), ClassLoader.getSystemClassLoader());
+            lock = new ReentrantLock();
         }
 
         // allows delegation of H2 to the AppClassLoader
         @Override
-        public synchronized Class<?> loadClass(String name, boolean resolve)
+        public Class<?> loadClass(String name, boolean resolve)
                 throws ClassNotFoundException {
-            if (!name.contains(CLASS_NAME) && !name.startsWith("org.h2.")) {
-                return super.loadClass(name, resolve);
-            }
-            Class<?> c = findLoadedClass(name);
-            if (c == null) {
-                try {
-                    c = findClass(name);
-                } catch (SecurityException | ClassNotFoundException e) {
+            lock.lock();
+            try {
+                if (!name.contains(CLASS_NAME) && !name.startsWith("org.h2.")) {
                     return super.loadClass(name, resolve);
                 }
-                if (resolve) {
-                    resolveClass(c);
+                Class<?> c = findLoadedClass(name);
+                if (c == null) {
+                    try {
+                        c = findClass(name);
+                    } catch (SecurityException | ClassNotFoundException e) {
+                        return super.loadClass(name, resolve);
+                    }
+                    if (resolve) {
+                        resolveClass(c);
+                    }
                 }
+                return c;
+            } finally {
+                lock.unlock();
             }
-            return c;
         }
     }
 

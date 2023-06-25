@@ -15,6 +15,8 @@ import java.util.HashSet;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.util.SoftValuesHashMap;
 
 /**
@@ -26,6 +28,7 @@ final class FullTextSettings {
      * The settings of open indexes.
      */
     private static final HashMap<String, FullTextSettings> SETTINGS = new HashMap<>();
+    private static final Lock SETTINGS_LOCK = new ReentrantLock();
 
     /**
      * Whether this instance has been initialized.
@@ -36,11 +39,13 @@ final class FullTextSettings {
      * The set of words not to index (stop words).
      */
     private final HashSet<String> ignoreList = new HashSet<>();
+    private final Lock ignoreListLock = new ReentrantLock();
 
     /**
      * The set of words / terms.
      */
     private final HashMap<String, Integer> words = new HashMap<>();
+    private final Lock wordsLock = new ReentrantLock();
 
     /**
      * The set of indexes in this database.
@@ -57,6 +62,8 @@ final class FullTextSettings {
      */
     private String whitespaceChars = " \t\n\r\f+\"*%&/()=?'!,.;:-_#@|^~`{}[]<>\\";
 
+    private final Lock lock = new ReentrantLock();
+
     /**
      * Create a new instance.
      */
@@ -68,8 +75,11 @@ final class FullTextSettings {
      * Clear set of ignored words
      */
     public void clearIgnored() {
-        synchronized (ignoreList) {
+        ignoreListLock.lock();
+        try {
             ignoreList.clear();
+        } finally {
+            ignoreListLock.unlock();
         }
     }
 
@@ -78,11 +88,14 @@ final class FullTextSettings {
      * @param words to add
      */
     public void addIgnored(Iterable<String> words) {
-        synchronized (ignoreList) {
+        ignoreListLock.lock();
+        try {
             for (String word : words) {
                 word = normalizeWord(word);
                 ignoreList.add(word);
             }
+        } finally {
+            ignoreListLock.unlock();
         }
     }
 
@@ -90,8 +103,11 @@ final class FullTextSettings {
      * Clear set of searchable words
      */
     public void clearWordList() {
-        synchronized (words) {
+        wordsLock.lock();
+        try {
             words.clear();
+        } finally {
+            wordsLock.unlock();
         }
     }
 
@@ -101,8 +117,11 @@ final class FullTextSettings {
      * @return Integer id or null if word is not found
      */
     public Integer getWordId(String word) {
-        synchronized (words) {
+        wordsLock.lock();
+        try {
             return words.get(word);
+        } finally {
+            wordsLock.unlock();
         }
     }
 
@@ -112,8 +131,11 @@ final class FullTextSettings {
      * @param id to register with
      */
     public void addWord(String word, Integer id) {
-        synchronized (words) {
+        wordsLock.lock();
+        try {
             words.putIfAbsent(word, id);
+        } finally {
+            wordsLock.unlock();
         }
     }
 
@@ -145,10 +167,13 @@ final class FullTextSettings {
      */
     String convertWord(String word) {
         word = normalizeWord(word);
-        synchronized (ignoreList) {
+        ignoreListLock.lock();
+        try {
             if (ignoreList.contains(word)) {
                 return null;
             }
+        } finally {
+            ignoreListLock.unlock();
         }
         return word;
     }
@@ -164,12 +189,15 @@ final class FullTextSettings {
             throws SQLException {
         String path = getIndexPath(conn);
         FullTextSettings setting;
-        synchronized (SETTINGS) {
+        SETTINGS_LOCK.lock();
+        try {
             setting = SETTINGS.get(path);
             if (setting == null) {
                 setting = new FullTextSettings();
                 SETTINGS.put(path, setting);
             }
+        } finally {
+            SETTINGS_LOCK.unlock();
         }
         return setting;
     }
@@ -203,21 +231,26 @@ final class FullTextSettings {
      * @return the prepared statement
      * @throws SQLException on failure
      */
-    synchronized PreparedStatement prepare(Connection conn, String sql) throws SQLException {
-        SoftValuesHashMap<String, PreparedStatement> c = cache.get(conn);
-        if (c == null) {
-            c = new SoftValuesHashMap<>();
-            cache.put(conn, c);
+    PreparedStatement prepare(Connection conn, String sql) throws SQLException {
+        lock.lock();
+        try {
+            SoftValuesHashMap<String, PreparedStatement> c = cache.get(conn);
+            if (c == null) {
+                c = new SoftValuesHashMap<>();
+                cache.put(conn, c);
+            }
+            PreparedStatement prep = c.get(sql);
+            if (prep != null && prep.getConnection().isClosed()) {
+                prep = null;
+            }
+            if (prep == null) {
+                prep = conn.prepareStatement(sql);
+                c.put(sql, prep);
+            }
+            return prep;
+        } finally {
+            lock.unlock();
         }
-        PreparedStatement prep = c.get(sql);
-        if (prep != null && prep.getConnection().isClosed()) {
-            prep = null;
-        }
-        if (prep == null) {
-            prep = conn.prepareStatement(sql);
-            c.put(sql, prep);
-        }
-        return prep;
     }
 
     /**
@@ -258,8 +291,11 @@ final class FullTextSettings {
      * Close all fulltext settings, freeing up memory.
      */
     static void closeAll() {
-        synchronized (SETTINGS) {
+        SETTINGS_LOCK.lock();
+        try {
             SETTINGS.clear();
+        } finally {
+            SETTINGS_LOCK.unlock();
         }
     }
 

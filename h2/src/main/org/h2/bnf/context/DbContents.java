@@ -11,6 +11,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Session;
 import org.h2.jdbc.JdbcConnection;
 import org.h2.util.ParserUtil;
@@ -22,6 +24,7 @@ import org.h2.util.Utils;
  * This class is used by the H2 Console.
  */
 public class DbContents {
+    private final Lock contentsLock = new ReentrantLock();
 
     private DbSchema[] schemas;
     private DbSchema defaultSchema;
@@ -141,65 +144,70 @@ public class DbContents {
      * @param conn the connection
      * @throws SQLException on failure
      */
-    public synchronized void readContents(String url, Connection conn)
+    public void readContents(String url, Connection conn)
             throws SQLException {
-        isH2 = url.startsWith("jdbc:h2:");
-        isDB2 = url.startsWith("jdbc:db2:");
-        isSQLite = url.startsWith("jdbc:sqlite:");
-        isOracle = url.startsWith("jdbc:oracle:");
-        // the Vertica engine is based on PostgreSQL
-        isPostgreSQL = url.startsWith("jdbc:postgresql:") || url.startsWith("jdbc:vertica:");
-        // isHSQLDB = url.startsWith("jdbc:hsqldb:");
-        isMySQL = url.startsWith("jdbc:mysql:");
-        isDerby = url.startsWith("jdbc:derby:");
-        isFirebird = url.startsWith("jdbc:firebirdsql:");
-        isMSSQLServer = url.startsWith("jdbc:sqlserver:");
-        if (isH2) {
-            Session.StaticSettings settings = ((JdbcConnection) conn).getStaticSettings();
-            databaseToUpper = settings.databaseToUpper;
-            databaseToLower = settings.databaseToLower;
-        }else if (isMySQL || isPostgreSQL) {
-            databaseToUpper = false;
-            databaseToLower = true;
-        } else {
-            databaseToUpper = true;
-            databaseToLower = false;
-        }
-        DatabaseMetaData meta = conn.getMetaData();
-        String defaultSchemaName = getDefaultSchemaName(meta);
-        String[] schemaNames = getSchemaNames(meta);
-        schemas = new DbSchema[schemaNames.length];
-        for (int i = 0; i < schemaNames.length; i++) {
-            String schemaName = schemaNames[i];
-            boolean isDefault = defaultSchemaName == null ||
-                    defaultSchemaName.equals(schemaName);
-            DbSchema schema = new DbSchema(this, schemaName, isDefault);
-            if (isDefault) {
-                defaultSchema = schema;
+        contentsLock.lock();
+        try {
+            isH2 = url.startsWith("jdbc:h2:");
+            isDB2 = url.startsWith("jdbc:db2:");
+            isSQLite = url.startsWith("jdbc:sqlite:");
+            isOracle = url.startsWith("jdbc:oracle:");
+            // the Vertica engine is based on PostgreSQL
+            isPostgreSQL = url.startsWith("jdbc:postgresql:") || url.startsWith("jdbc:vertica:");
+            // isHSQLDB = url.startsWith("jdbc:hsqldb:");
+            isMySQL = url.startsWith("jdbc:mysql:");
+            isDerby = url.startsWith("jdbc:derby:");
+            isFirebird = url.startsWith("jdbc:firebirdsql:");
+            isMSSQLServer = url.startsWith("jdbc:sqlserver:");
+            if (isH2) {
+                Session.StaticSettings settings = ((JdbcConnection) conn).getStaticSettings();
+                databaseToUpper = settings.databaseToUpper;
+                databaseToLower = settings.databaseToLower;
+            } else if (isMySQL || isPostgreSQL) {
+                databaseToUpper = false;
+                databaseToLower = true;
+            } else {
+                databaseToUpper = true;
+                databaseToLower = false;
             }
-            schemas[i] = schema;
-            String[] tableTypes = { "TABLE", "SYSTEM TABLE", "VIEW",
-                    "SYSTEM VIEW", "TABLE LINK", "SYNONYM", "EXTERNAL" };
-            schema.readTables(meta, tableTypes);
-            if (!isPostgreSQL && !isDB2) {
-                schema.readProcedures(meta);
-            }
-        }
-        if (defaultSchema == null) {
-            String best = null;
-            for (DbSchema schema : schemas) {
-                if ("dbo".equals(schema.name)) {
-                    // MS SQL Server
-                    defaultSchema = schema;
-                    break;
-                }
-                if (defaultSchema == null ||
-                        best == null ||
-                        schema.name.length() < best.length()) {
-                    best = schema.name;
+            DatabaseMetaData meta = conn.getMetaData();
+            String defaultSchemaName = getDefaultSchemaName(meta);
+            String[] schemaNames = getSchemaNames(meta);
+            schemas = new DbSchema[schemaNames.length];
+            for (int i = 0; i < schemaNames.length; i++) {
+                String schemaName = schemaNames[i];
+                boolean isDefault = defaultSchemaName == null ||
+                        defaultSchemaName.equals(schemaName);
+                DbSchema schema = new DbSchema(this, schemaName, isDefault);
+                if (isDefault) {
                     defaultSchema = schema;
                 }
+                schemas[i] = schema;
+                String[] tableTypes = {"TABLE", "SYSTEM TABLE", "VIEW",
+                        "SYSTEM VIEW", "TABLE LINK", "SYNONYM", "EXTERNAL"};
+                schema.readTables(meta, tableTypes);
+                if (!isPostgreSQL && !isDB2) {
+                    schema.readProcedures(meta);
+                }
             }
+            if (defaultSchema == null) {
+                String best = null;
+                for (DbSchema schema : schemas) {
+                    if ("dbo".equals(schema.name)) {
+                        // MS SQL Server
+                        defaultSchema = schema;
+                        break;
+                    }
+                    if (defaultSchema == null ||
+                            best == null ||
+                            schema.name.length() < best.length()) {
+                        best = schema.name;
+                        defaultSchema = schema;
+                    }
+                }
+            }
+        } finally {
+            contentsLock.unlock();
         }
     }
 

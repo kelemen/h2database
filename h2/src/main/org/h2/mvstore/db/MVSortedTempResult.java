@@ -8,6 +8,8 @@ package org.h2.mvstore.db;
 import java.util.Arrays;
 import java.util.BitSet;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Database;
 import org.h2.expression.Expression;
 import org.h2.message.DbException;
@@ -84,6 +86,8 @@ class MVSortedTempResult extends MVTempResult {
      * non-distinct results.
      */
     private long valueCount;
+
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Creates a shallow copy of the result.
@@ -289,15 +293,20 @@ class MVSortedTempResult extends MVTempResult {
     }
 
     @Override
-    public synchronized ResultExternal createShallowCopy() {
-        if (parent != null) {
-            return parent.createShallowCopy();
+    public ResultExternal createShallowCopy() {
+        lock.lock();
+        try {
+            if (parent != null) {
+                return parent.createShallowCopy();
+            }
+            if (closed) {
+                return null;
+            }
+            childCount++;
+            return new MVSortedTempResult(this);
+        } finally {
+            lock.unlock();
         }
-        if (closed) {
-            return null;
-        }
-        childCount++;
-        return new MVSortedTempResult(this);
     }
 
     /**

@@ -7,6 +7,8 @@ package org.h2.test.store;
 
 import java.util.TreeSet;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.mvstore.DataUtils;
 import org.h2.util.MathUtils;
 
@@ -29,8 +31,10 @@ public class FreeSpaceTree {
      * The list of free space.
      */
     private TreeSet<BlockRange> freeSpace = new TreeSet<>();
+    private final Lock lock;
 
     public FreeSpaceTree(int firstFreeBlock, int blockSize) {
+        this.lock = new ReentrantLock();
         this.firstFreeBlock = firstFreeBlock;
         if (Integer.bitCount(blockSize) != 1) {
             throw DataUtils.newIllegalArgumentException("Block size is not a power of 2");
@@ -42,10 +46,15 @@ public class FreeSpaceTree {
     /**
      * Reset the list.
      */
-    public synchronized void clear() {
-        freeSpace.clear();
-        freeSpace.add(new BlockRange(firstFreeBlock,
-                Integer.MAX_VALUE - firstFreeBlock));
+    public void clear() {
+        lock.lock();
+        try {
+            freeSpace.clear();
+            freeSpace.add(new BlockRange(firstFreeBlock,
+                    Integer.MAX_VALUE - firstFreeBlock));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -54,23 +63,28 @@ public class FreeSpaceTree {
      * @param length the number of bytes to allocate
      * @return the start position in bytes
      */
-    public synchronized long allocate(int length) {
-        int blocks = getBlockCount(length);
-        BlockRange x = null;
-        for (BlockRange b : freeSpace) {
-            if (b.blocks >= blocks) {
-                x = b;
-                break;
+    public long allocate(int length) {
+        lock.lock();
+        try {
+            int blocks = getBlockCount(length);
+            BlockRange x = null;
+            for (BlockRange b : freeSpace) {
+                if (b.blocks >= blocks) {
+                    x = b;
+                    break;
+                }
             }
+            long pos = getPos(x.start);
+            if (x.blocks == blocks) {
+                freeSpace.remove(x);
+            } else {
+                x.start += blocks;
+                x.blocks -= blocks;
+            }
+            return pos;
+        } finally {
+            lock.unlock();
         }
-        long pos = getPos(x.start);
-        if (x.blocks == blocks) {
-            freeSpace.remove(x);
-        } else {
-            x.start += blocks;
-            x.blocks -= blocks;
-        }
-        return pos;
     }
 
     /**
@@ -79,33 +93,38 @@ public class FreeSpaceTree {
      * @param pos the position in bytes
      * @param length the number of bytes
      */
-    public synchronized void markUsed(long pos, int length) {
-        int start = getBlock(pos);
-        int blocks = getBlockCount(length);
-        BlockRange x = new BlockRange(start, blocks);
-        BlockRange prev = freeSpace.floor(x);
-        if (prev == null) {
-            throw DataUtils.newMVStoreException(
-                    DataUtils.ERROR_INTERNAL, "Free space already marked");
-        }
-        if (prev.start == start) {
-            if (prev.blocks == blocks) {
-                // match
-                freeSpace.remove(prev);
-            } else {
-                // cut the front
-                prev.start += blocks;
-                prev.blocks -= blocks;
+    public void markUsed(long pos, int length) {
+        lock.lock();
+        try {
+            int start = getBlock(pos);
+            int blocks = getBlockCount(length);
+            BlockRange x = new BlockRange(start, blocks);
+            BlockRange prev = freeSpace.floor(x);
+            if (prev == null) {
+                throw DataUtils.newMVStoreException(
+                        DataUtils.ERROR_INTERNAL, "Free space already marked");
             }
-        } else if (prev.start + prev.blocks == start + blocks) {
-            // cut the end
-            prev.blocks -= blocks;
-        } else {
-            // insert an entry
-            x.start = start + blocks;
-            x.blocks = prev.start + prev.blocks - x.start;
-            freeSpace.add(x);
-            prev.blocks = start - prev.start;
+            if (prev.start == start) {
+                if (prev.blocks == blocks) {
+                    // match
+                    freeSpace.remove(prev);
+                } else {
+                    // cut the front
+                    prev.start += blocks;
+                    prev.blocks -= blocks;
+                }
+            } else if (prev.start + prev.blocks == start + blocks) {
+                // cut the end
+                prev.blocks -= blocks;
+            } else {
+                // insert an entry
+                x.start = start + blocks;
+                x.blocks = prev.start + prev.blocks - x.start;
+                freeSpace.add(x);
+                prev.blocks = start - prev.start;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -115,35 +134,40 @@ public class FreeSpaceTree {
      * @param pos the position in bytes
      * @param length the number of bytes
      */
-    public synchronized void free(long pos, int length) {
-        int start = getBlock(pos);
-        int blocks = getBlockCount(length);
-        BlockRange x = new BlockRange(start, blocks);
-        BlockRange next = freeSpace.ceiling(x);
-        if (next == null) {
-            throw DataUtils.newMVStoreException(
-                    DataUtils.ERROR_INTERNAL, "Free space sentinel is missing");
-        }
-        BlockRange prev = freeSpace.lower(x);
-        if (prev != null) {
-            if (prev.start + prev.blocks == start) {
-                // extend the previous entry
-                prev.blocks += blocks;
-                if (prev.start + prev.blocks == next.start) {
-                    // merge with the next entry
-                    prev.blocks += next.blocks;
-                    freeSpace.remove(next);
+    public void free(long pos, int length) {
+        lock.lock();
+        try {
+            int start = getBlock(pos);
+            int blocks = getBlockCount(length);
+            BlockRange x = new BlockRange(start, blocks);
+            BlockRange next = freeSpace.ceiling(x);
+            if (next == null) {
+                throw DataUtils.newMVStoreException(
+                        DataUtils.ERROR_INTERNAL, "Free space sentinel is missing");
+            }
+            BlockRange prev = freeSpace.lower(x);
+            if (prev != null) {
+                if (prev.start + prev.blocks == start) {
+                    // extend the previous entry
+                    prev.blocks += blocks;
+                    if (prev.start + prev.blocks == next.start) {
+                        // merge with the next entry
+                        prev.blocks += next.blocks;
+                        freeSpace.remove(next);
+                    }
+                    return;
                 }
+            }
+            if (start + blocks == next.start) {
+                // extend the next entry
+                next.start -= blocks;
+                next.blocks += blocks;
                 return;
             }
+            freeSpace.add(x);
+        } finally {
+            lock.unlock();
         }
-        if (start + blocks == next.start) {
-            // extend the next entry
-            next.start -= blocks;
-            next.blocks += blocks;
-            return;
-        }
-        freeSpace.add(x);
     }
 
     private long getPos(int block) {

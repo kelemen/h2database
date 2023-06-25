@@ -11,6 +11,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.Random;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBase;
 import org.h2.store.fs.FilePath;
 import org.h2.store.fs.FilePathWrapper;
@@ -124,6 +126,7 @@ class FileUnstable extends FileBase {
     private final FilePathUnstable file;
     private final FileChannel channel;
     private boolean closed;
+    private final Lock lock = new ReentrantLock();
 
     FileUnstable(FilePathUnstable file, FileChannel channel) {
         this.file = file;
@@ -201,9 +204,14 @@ class FileUnstable extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
-        return channel.tryLock(position, size, shared);
+        lock.lock();
+        try {
+            return channel.tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

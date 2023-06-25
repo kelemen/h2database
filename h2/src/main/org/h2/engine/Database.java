@@ -18,6 +18,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.DatabaseEventListener;
 import org.h2.api.ErrorCode;
 import org.h2.api.JavaObjectSerializer;
@@ -124,6 +127,8 @@ public final class Database implements DataHandler, CastDataProvider {
      */
     private static final String SYSTEM_USER_NAME = "DBA";
 
+    private final ReentrantLock dbLock;
+    private final Condition dbLockCondition;
     private final boolean persistent;
     private final String databaseName;
     private final String databaseShortName;
@@ -139,10 +144,11 @@ public final class Database implements DataHandler, CastDataProvider {
 
     private final HashMap<String, TableEngine> tableEngines = new HashMap<>();
 
-    private final Set<SessionLocal> userSessions = Collections.synchronizedSet(new HashSet<>());
+    private final Set<SessionLocal> userSessions = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final AtomicReference<SessionLocal> exclusiveSession = new AtomicReference<>();
     private final BitSet objectIds = new BitSet();
-    private final Object lobSyncObject = new Object();
+    private final Lock objectIdsLock = new ReentrantLock();
+    private final Lock lobSyncObject = new ReentrantLock();
 
     private final Schema mainSchema;
     private final Schema infoSchema;
@@ -193,9 +199,11 @@ public final class Database implements DataHandler, CastDataProvider {
     private final int autoServerPort;
     private Server server;
     private HashMap<TableLinkConnection, TableLinkConnection> linkConnections;
+    private Lock linkConnectionsLock = new ReentrantLock();
     private final TempFileDeleter tempFileDeleter = TempFileDeleter.getInstance();
     private int compactMode;
     private SourceCompiler compiler;
+    private Lock compilerLock;
     private final LobStorageInterface lobStorage;
     private final int pageSize;
     private int defaultTableType = Table.TYPE_CACHED;
@@ -220,6 +228,8 @@ public final class Database implements DataHandler, CastDataProvider {
             META_LOCK_DEBUGGING_DB.set(null);
             META_LOCK_DEBUGGING_STACK.set(null);
         }
+        this.dbLock = new ReentrantLock();
+        this.dbLockCondition = this.dbLock.newCondition();
         String databaseName = ci.getName();
         this.dbSettings = ci.getDbSettings();
         this.compareMode = CompareMode.getInstance(null, 0);
@@ -402,6 +412,10 @@ public final class Database implements DataHandler, CastDataProvider {
             }
             throw DbException.convert(e);
         }
+    }
+
+    public ReentrantLock dbLock() {
+        return dbLock;
     }
 
     public int getLockTimeout() {
@@ -605,7 +619,9 @@ public final class Database implements DataHandler, CastDataProvider {
                 lastRecords.add(rec);
             }
         }
-        synchronized (systemSession) {
+        Lock sessionLock = systemSession.sessionLock();
+        sessionLock.lock();
+        try {
             executeMeta(firstRecords);
             // Domains may depend on other domains
             int count = domainRecords.size();
@@ -650,6 +666,8 @@ public final class Database implements DataHandler, CastDataProvider {
                 }
             }
             executeMeta(lastRecords);
+        } finally {
+            sessionLock.unlock();
         }
     }
 
@@ -714,7 +732,7 @@ public final class Database implements DataHandler, CastDataProvider {
     }
 
     private void addMeta(SessionLocal session, DbObject obj) {
-        assert Thread.holdsLock(this);
+        assert dbLock.isHeldByCurrentThread();
         int id = obj.getId();
         if (id > 0 && !obj.isTemporary()) {
             if (!isReadOnly()) {
@@ -861,8 +879,11 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param idsToRelease the ids to release
      */
     public void releaseDatabaseObjectIds(BitSet idsToRelease) {
-        synchronized (objectIds) {
+        objectIdsLock.lock();
+        try {
             objectIds.andNot(idsToRelease);
+        } finally {
+            objectIdsLock.unlock();
         }
     }
 
@@ -904,9 +925,12 @@ public final class Database implements DataHandler, CastDataProvider {
             checkWritingAllowed();
         }
         lockMeta(session);
-        synchronized (this) {
+        dbLock.lock();
+        try {
             obj.getSchema().add(obj);
             addMeta(session, obj);
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -916,25 +940,30 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param session the session
      * @param obj the object to add
      */
-    public synchronized void addDatabaseObject(SessionLocal session, DbObject obj) {
-        int id = obj.getId();
-        if (id > 0 && !starting) {
-            checkWritingAllowed();
-        }
-        Map<String, DbObject> map = getMap(obj.getType());
-        if (obj.getType() == DbObject.USER) {
-            User user = (User) obj;
-            if (user.isAdmin() && systemUser.getName().equals(SYSTEM_USER_NAME)) {
-                systemUser.rename(user.getName());
+    public void addDatabaseObject(SessionLocal session, DbObject obj) {
+        dbLock.lock();
+        try {
+            int id = obj.getId();
+            if (id > 0 && !starting) {
+                checkWritingAllowed();
             }
+            Map<String, DbObject> map = getMap(obj.getType());
+            if (obj.getType() == DbObject.USER) {
+                User user = (User) obj;
+                if (user.isAdmin() && systemUser.getName().equals(SYSTEM_USER_NAME)) {
+                    systemUser.rename(user.getName());
+                }
+            }
+            String name = obj.getName();
+            if (SysProperties.CHECK && map.get(name) != null) {
+                throw DbException.getInternalError("object already exists");
+            }
+            lockMeta(session);
+            addMeta(session, obj);
+            map.put(name, obj);
+        } finally {
+            dbLock.unlock();
         }
-        String name = obj.getName();
-        if (SysProperties.CHECK && map.get(name) != null) {
-            throw DbException.getInternalError("object already exists");
-        }
-        lockMeta(session);
-        addMeta(session, obj);
-        map.put(name, obj);
     }
 
     /**
@@ -1031,22 +1060,27 @@ public final class Database implements DataHandler, CastDataProvider {
      * @return the session, or null if the database is currently closing
      * @throws DbException if the database is in exclusive mode
      */
-    synchronized SessionLocal createSession(User user, NetworkConnectionInfo networkConnectionInfo) {
-        if (closing) {
-            return null;
+    SessionLocal createSession(User user, NetworkConnectionInfo networkConnectionInfo) {
+        dbLock.lock();
+        try {
+            if (closing) {
+                return null;
+            }
+            if (exclusiveSession.get() != null) {
+                throw DbException.get(ErrorCode.DATABASE_IS_IN_EXCLUSIVE_MODE);
+            }
+            SessionLocal session = createSession(user);
+            session.setNetworkConnectionInfo(networkConnectionInfo);
+            userSessions.add(session);
+            trace.info("connecting session #{0} to {1}", session.getId(), databaseName);
+            if (delayedCloser != null) {
+                delayedCloser.reset();
+                delayedCloser = null;
+            }
+            return session;
+        } finally {
+            dbLock.unlock();
         }
-        if (exclusiveSession.get() != null) {
-            throw DbException.get(ErrorCode.DATABASE_IS_IN_EXCLUSIVE_MODE);
-        }
-        SessionLocal session = createSession(user);
-        session.setNetworkConnectionInfo(networkConnectionInfo);
-        userSessions.add(session);
-        trace.info("connecting session #{0} to {1}", session.getId(), databaseName);
-        if (delayedCloser != null) {
-            delayedCloser.reset();
-            delayedCloser = null;
-        }
-        return session;
     }
 
     private SessionLocal createSession(User user) {
@@ -1059,26 +1093,31 @@ public final class Database implements DataHandler, CastDataProvider {
      *
      * @param session the session
      */
-    public synchronized void removeSession(SessionLocal session) {
-        if (session != null) {
-            exclusiveSession.compareAndSet(session, null);
-            if (userSessions.remove(session)) {
-                trace.info("disconnecting session #{0}", session.getId());
-            }
-        }
-        if (isUserSession(session)) {
-            if (userSessions.isEmpty()) {
-                if (closeDelay == 0) {
-                    close(false);
-                } else if (closeDelay < 0) {
-                    return;
-                } else {
-                    delayedCloser = new DelayedDatabaseCloser(this, closeDelay * 1000);
+    public void removeSession(SessionLocal session) {
+        dbLock.lock();
+        try {
+            if (session != null) {
+                exclusiveSession.compareAndSet(session, null);
+                if (userSessions.remove(session)) {
+                    trace.info("disconnecting session #{0}", session.getId());
                 }
             }
-            if (session != null) {
-                trace.info("disconnected session #{0}", session.getId());
+            if (isUserSession(session)) {
+                if (userSessions.isEmpty()) {
+                    if (closeDelay == 0) {
+                        close(false);
+                    } else if (closeDelay < 0) {
+                        return;
+                    } else {
+                        delayedCloser = new DelayedDatabaseCloser(this, closeDelay * 1000);
+                    }
+                }
+                if (session != null) {
+                    trace.info("disconnected session #{0}", session.getId());
+                }
             }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1086,49 +1125,54 @@ public final class Database implements DataHandler, CastDataProvider {
         return session != systemSession && session != lobSession;
     }
 
-    private synchronized void closeAllSessionsExcept(SessionLocal except) {
-        SessionLocal[] all = userSessions.toArray(EMPTY_SESSION_ARRAY);
-        for (SessionLocal s : all) {
-            if (s != except) {
-                // indicate that session need to be closed ASAP
-                s.suspend();
+    private void closeAllSessionsExcept(SessionLocal except) {
+        dbLock.lock();
+        try {
+            SessionLocal[] all = userSessions.toArray(EMPTY_SESSION_ARRAY);
+            for (SessionLocal s : all) {
+                if (s != except) {
+                    // indicate that session need to be closed ASAP
+                    s.suspend();
+                }
             }
-        }
 
-        int timeout = 2 * getLockTimeout();
-        long start = System.currentTimeMillis();
-        // 'sleep' should be strictly greater than zero, otherwise real time is not taken into consideration
-        // and the thread simply waits until notified
-        long sleep = Math.max(timeout / 20, 1);
-        boolean done = false;
-        while (!done) {
-            try {
-                // although nobody going to notify us
-                // it is vital to give up lock on a database
-                wait(sleep);
-            } catch (InterruptedException e1) {
-                // ignore
-            }
-            if (System.currentTimeMillis() - start > timeout) {
-                for (SessionLocal s : all) {
-                    if (s != except && !s.isClosed()) {
-                        try {
-                            // this will rollback outstanding transaction
-                            s.close();
-                        } catch (Throwable e) {
-                            trace.error(e, "disconnecting session #{0}", s.getId());
+            int timeout = 2 * getLockTimeout();
+            long start = System.currentTimeMillis();
+            // 'sleep' should be strictly greater than zero, otherwise real time is not taken into consideration
+            // and the thread simply waits until notified
+            long sleep = Math.max(timeout / 20, 1);
+            boolean done = false;
+            while (!done) {
+                try {
+                    // although nobody going to notify us
+                    // it is vital to give up lock on a database
+                    dbLockCondition.wait(sleep);
+                } catch (InterruptedException e1) {
+                    // ignore
+                }
+                if (System.currentTimeMillis() - start > timeout) {
+                    for (SessionLocal s : all) {
+                        if (s != except && !s.isClosed()) {
+                            try {
+                                // this will rollback outstanding transaction
+                                s.close();
+                            } catch (Throwable e) {
+                                trace.error(e, "disconnecting session #{0}", s.getId());
+                            }
                         }
                     }
-                }
-                break;
-            }
-            done = true;
-            for (SessionLocal s : all) {
-                if (s != except && !s.isClosed()) {
-                    done = false;
                     break;
                 }
+                done = true;
+                for (SessionLocal s : all) {
+                    if (s != except && !s.isClosed()) {
+                        done = false;
+                        break;
+                    }
+                }
             }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1155,7 +1199,8 @@ public final class Database implements DataHandler, CastDataProvider {
     }
 
     private void closeImpl(boolean fromShutdownHook) {
-        synchronized (this) {
+        dbLock.lock();
+        try {
             if (closing || !fromShutdownHook && !userSessions.isEmpty()) {
                 return;
             }
@@ -1181,6 +1226,8 @@ public final class Database implements DataHandler, CastDataProvider {
                     closeAllSessionsExcept(null);
                 }
             }
+        } finally {
+            dbLock.unlock();
         }
         try {
             try {
@@ -1247,7 +1294,8 @@ public final class Database implements DataHandler, CastDataProvider {
     /**
      * Close all open files and unlock the database.
      */
-    private synchronized void closeOpenFilesAndUnlock() {
+    private void closeOpenFilesAndUnlock() {
+        dbLock.lock();
         try {
             lobStorage.close();
             if (!store.getMvStore().isClosed()) {
@@ -1270,18 +1318,25 @@ public final class Database implements DataHandler, CastDataProvider {
                 }
             }
         } finally {
-            if (lock != null) {
-                lock.unlock();
-                lock = null;
+            try {
+                if (lock != null) {
+                    lock.unlock();
+                    lock = null;
+                }
+            } finally {
+                dbLock.unlock();
             }
         }
     }
 
-    private synchronized void closeFiles() {
+    private void closeFiles() {
+        dbLock.lock();
         try {
             store.closeImmediately();
         } catch (DbException e) {
             trace.error(e, "close");
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1301,9 +1356,12 @@ public final class Database implements DataHandler, CastDataProvider {
      */
     public int allocateObjectId() {
         int i;
-        synchronized (objectIds) {
+        objectIdsLock.lock();
+        try {
             i = objectIds.nextClearBit(0);
             objectIds.set(i);
+        } finally {
+            objectIdsLock.unlock();
         }
         return i;
     }
@@ -1423,8 +1481,11 @@ public final class Database implements DataHandler, CastDataProvider {
         ArrayList<SessionLocal> list;
         // need to synchronized on this database,
         // otherwise the list may contain null elements
-        synchronized (this) {
+        dbLock.lock();
+        try {
             list = new ArrayList<>(userSessions);
+        } finally {
+            dbLock.unlock();
         }
         if (includingSystemSession) {
             // copy, to ensure the reference is stable
@@ -1458,8 +1519,11 @@ public final class Database implements DataHandler, CastDataProvider {
                 }
             }
             // for temporary objects
-            synchronized (objectIds) {
+            objectIdsLock.lock();
+            try {
                 objectIds.set(id);
+            } finally {
+                objectIdsLock.unlock();
             }
         }
     }
@@ -1471,27 +1535,37 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param obj the object
      * @param newName the new name
      */
-    public synchronized void renameSchemaObject(SessionLocal session,
+    public void renameSchemaObject(SessionLocal session,
             SchemaObject obj, String newName) {
-        checkWritingAllowed();
-        obj.getSchema().rename(obj, newName);
-        updateMetaAndFirstLevelChildren(session, obj);
+        dbLock.lock();
+        try {
+            checkWritingAllowed();
+            obj.getSchema().rename(obj, newName);
+            updateMetaAndFirstLevelChildren(session, obj);
+        } finally {
+            dbLock.unlock();
+        }
     }
 
-    private synchronized void updateMetaAndFirstLevelChildren(SessionLocal session, DbObject obj) {
-        ArrayList<DbObject> list = obj.getChildren();
-        Comment comment = findComment(obj);
-        if (comment != null) {
-            throw DbException.getInternalError(comment.toString());
-        }
-        updateMeta(session, obj);
-        // remember that this scans only one level deep!
-        if (list != null) {
-            for (DbObject o : list) {
-                if (o.getCreateSQL() != null) {
-                    updateMeta(session, o);
+    private void updateMetaAndFirstLevelChildren(SessionLocal session, DbObject obj) {
+        dbLock.lock();
+        try {
+            ArrayList<DbObject> list = obj.getChildren();
+            Comment comment = findComment(obj);
+            if (comment != null) {
+                throw DbException.getInternalError(comment.toString());
+            }
+            updateMeta(session, obj);
+            // remember that this scans only one level deep!
+            if (list != null) {
+                for (DbObject o : list) {
+                    if (o.getCreateSQL() != null) {
+                        updateMeta(session, o);
+                    }
                 }
             }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1502,24 +1576,30 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param obj the object
      * @param newName the new name
      */
-    public synchronized void renameDatabaseObject(SessionLocal session,
+    public void renameDatabaseObject(SessionLocal session,
             DbObject obj, String newName) {
-        checkWritingAllowed();
-        int type = obj.getType();
-        Map<String, DbObject> map = getMap(type);
-        if (SysProperties.CHECK) {
-            if (!map.containsKey(obj.getName())) {
-                throw DbException.getInternalError("not found: " + obj.getName());
+        dbLock.lock();
+        try {
+
+            checkWritingAllowed();
+            int type = obj.getType();
+            Map<String, DbObject> map = getMap(type);
+            if (SysProperties.CHECK) {
+                if (!map.containsKey(obj.getName())) {
+                    throw DbException.getInternalError("not found: " + obj.getName());
+                }
+                if (obj.getName().equals(newName) || map.containsKey(newName)) {
+                    throw DbException.getInternalError("object already exists: " + newName);
+                }
             }
-            if (obj.getName().equals(newName) || map.containsKey(newName)) {
-                throw DbException.getInternalError("object already exists: " + newName);
-            }
+            obj.checkRename();
+            map.remove(obj.getName());
+            obj.rename(newName);
+            map.put(newName, obj);
+            updateMetaAndFirstLevelChildren(session, obj);
+        } finally {
+            dbLock.unlock();
         }
-        obj.checkRename();
-        map.remove(obj.getName());
-        obj.rename(newName);
-        map.put(newName, obj);
-        updateMetaAndFirstLevelChildren(session, obj);
     }
 
     private void deleteOldTempFiles() {
@@ -1554,23 +1634,28 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param session the session
      * @param obj the object to remove
      */
-    public synchronized void removeDatabaseObject(SessionLocal session, DbObject obj) {
-        checkWritingAllowed();
-        String objName = obj.getName();
-        int type = obj.getType();
-        Map<String, DbObject> map = getMap(type);
-        if (SysProperties.CHECK && !map.containsKey(objName)) {
-            throw DbException.getInternalError("not found: " + objName);
+    public void removeDatabaseObject(SessionLocal session, DbObject obj) {
+        dbLock.lock();
+        try {
+            checkWritingAllowed();
+            String objName = obj.getName();
+            int type = obj.getType();
+            Map<String, DbObject> map = getMap(type);
+            if (SysProperties.CHECK && !map.containsKey(objName)) {
+                throw DbException.getInternalError("not found: " + objName);
+            }
+            Comment comment = findComment(obj);
+            lockMeta(session);
+            if (comment != null) {
+                removeDatabaseObject(session, comment);
+            }
+            int id = obj.getId();
+            obj.removeChildrenAndResources(session);
+            map.remove(objName);
+            removeMeta(session, id);
+        } finally {
+            dbLock.unlock();
         }
-        Comment comment = findComment(obj);
-        lockMeta(session);
-        if (comment != null) {
-            removeDatabaseObject(session, comment);
-        }
-        int id = obj.getId();
-        obj.removeChildrenAndResources(session);
-        map.remove(objName);
-        removeMeta(session, id);
     }
 
     /**
@@ -1641,7 +1726,8 @@ public final class Database implements DataHandler, CastDataProvider {
         }
         checkWritingAllowed();
         lockMeta(session);
-        synchronized (this) {
+        dbLock.lock();
+        try {
             Comment comment = findComment(obj);
             if (comment != null) {
                 removeDatabaseObject(session, comment);
@@ -1657,6 +1743,8 @@ public final class Database implements DataHandler, CastDataProvider {
                 obj.removeChildrenAndResources(session);
             }
             removeMeta(session, id);
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1673,18 +1761,28 @@ public final class Database implements DataHandler, CastDataProvider {
         return traceSystem;
     }
 
-    public synchronized void setCacheSize(int kb) {
-        if (starting) {
-            int max = MathUtils.convertLongToInt(Utils.getMemoryMax()) / 2;
-            kb = Math.min(kb, max);
+    public void setCacheSize(int kb) {
+        dbLock.lock();
+        try {
+            if (starting) {
+                int max = MathUtils.convertLongToInt(Utils.getMemoryMax()) / 2;
+                kb = Math.min(kb, max);
+            }
+            store.setCacheSize(Math.max(1, kb));
+        } finally {
+            dbLock.unlock();
         }
-        store.setCacheSize(Math.max(1, kb));
     }
 
-    public synchronized void setMasterUser(User user) {
-        lockMeta(systemSession);
-        addDatabaseObject(systemSession, user);
-        systemSession.commit(true);
+    public void setMasterUser(User user) {
+        dbLock.lock();
+        try {
+            lockMeta(systemSession);
+            addDatabaseObject(systemSession, user);
+            systemSession.commit(true);
+        } finally {
+            dbLock.unlock();
+        }
     }
 
     public Role getPublicRole() {
@@ -1698,16 +1796,21 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param session the session
      * @return a unique name
      */
-    public synchronized String getTempTableName(String baseName, SessionLocal session) {
-        int maxBaseLength = Constants.MAX_IDENTIFIER_LENGTH - (7 + ValueInteger.DISPLAY_SIZE * 2);
-        if (baseName.length() > maxBaseLength) {
-            baseName = baseName.substring(0, maxBaseLength);
+    public String getTempTableName(String baseName, SessionLocal session) {
+        dbLock.lock();
+        try {
+            int maxBaseLength = Constants.MAX_IDENTIFIER_LENGTH - (7 + ValueInteger.DISPLAY_SIZE * 2);
+            if (baseName.length() > maxBaseLength) {
+                baseName = baseName.substring(0, maxBaseLength);
+            }
+            String tempName;
+            do {
+                tempName = baseName + "_COPY_" + session.getId() + '_' + nextTempTableId++;
+            } while (mainSchema.findTableOrView(session, tempName) != null);
+            return tempName;
+        } finally {
+            dbLock.unlock();
         }
-        String tempName;
-        do {
-            tempName = baseName + "_COPY_" + session.getId() + '_' + nextTempTableId++;
-        } while (mainSchema.findTableOrView(session, tempName) != null);
-        return tempName;
     }
 
     public void setCompareMode(CompareMode compareMode) {
@@ -1764,9 +1867,14 @@ public final class Database implements DataHandler, CastDataProvider {
      * @param session the session
      * @param transaction the name of the transaction
      */
-    synchronized void prepareCommit(SessionLocal session, String transaction) {
-        if (!readOnly) {
-            store.prepareCommit(session, transaction);
+    void prepareCommit(SessionLocal session, String transaction) {
+        dbLock.lock();
+        try {
+            if (!readOnly) {
+                store.prepareCommit(session, transaction);
+            }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1805,14 +1913,19 @@ public final class Database implements DataHandler, CastDataProvider {
     /**
      * Flush all pending changes to the transaction log.
      */
-    public synchronized void flush() {
-        if (!readOnly) {
-            try {
-                store.flush();
-            } catch (RuntimeException e) {
-                backgroundException.compareAndSet(null, DbException.convert(e));
-                throw e;
+    public void flush() {
+        dbLock.lock();
+        try {
+            if (!readOnly) {
+                try {
+                    store.flush();
+                } catch (RuntimeException e) {
+                    backgroundException.compareAndSet(null, DbException.convert(e));
+                    throw e;
+                }
             }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -1880,11 +1993,16 @@ public final class Database implements DataHandler, CastDataProvider {
      * Synchronize the files with the file system. This method is called when
      * executing the SQL statement CHECKPOINT SYNC.
      */
-    public synchronized void sync() {
-        if (readOnly) {
-            return;
+    public void sync() {
+        dbLock.lock();
+        try {
+            if (readOnly) {
+                return;
+            }
+            store.sync();
+        } finally {
+            dbLock.unlock();
         }
-        store.sync();
     }
 
     public int getMaxMemoryRows() {
@@ -1961,8 +2079,13 @@ public final class Database implements DataHandler, CastDataProvider {
     }
 
 
-    public synchronized void setDeleteFilesOnDisconnect(boolean b) {
-        this.deleteFilesOnDisconnect = b;
+    public void setDeleteFilesOnDisconnect(boolean b) {
+        dbLock.lock();
+        try {
+            this.deleteFilesOnDisconnect = b;
+        } finally {
+            dbLock.unlock();
+        }
     }
 
     public void setAllowLiterals(int value) {
@@ -1978,7 +2101,7 @@ public final class Database implements DataHandler, CastDataProvider {
     }
 
     @Override
-    public Object getLobSyncObject() {
+    public Lock getLobSyncObject() {
         return lobSyncObject;
     }
 
@@ -1996,10 +2119,13 @@ public final class Database implements DataHandler, CastDataProvider {
 
     public void setQueryStatistics(boolean b) {
         queryStatistics = b;
-        synchronized (this) {
+        dbLock.lock();
+        try {
             if (!b) {
                 queryStatisticsData = null;
             }
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -2010,10 +2136,13 @@ public final class Database implements DataHandler, CastDataProvider {
     public void setQueryStatisticsMaxEntries(int n) {
         queryStatisticsMaxEntries = n;
         if (queryStatisticsData != null) {
-            synchronized (this) {
+            dbLock.lock();
+            try {
                 if (queryStatisticsData != null) {
                     queryStatisticsData.setMaxQueryEntries(queryStatisticsMaxEntries);
                 }
+            } finally {
+                dbLock.unlock();
             }
         }
     }
@@ -2023,10 +2152,13 @@ public final class Database implements DataHandler, CastDataProvider {
             return null;
         }
         if (queryStatisticsData == null) {
-            synchronized (this) {
+            dbLock.lock();
+            try {
                 if (queryStatisticsData == null) {
                     queryStatisticsData = new QueryStatisticsData(queryStatisticsMaxEntries);
                 }
+            } finally {
+                dbLock.unlock();
             }
         }
         return queryStatisticsData;
@@ -2154,8 +2286,9 @@ public final class Database implements DataHandler, CastDataProvider {
             String user, String password) {
         if (linkConnections == null) {
             linkConnections = new HashMap<>();
+            linkConnectionsLock = new ReentrantLock();
         }
-        return TableLinkConnection.open(linkConnections, driver, url, user,
+        return TableLinkConnection.open(linkConnections, linkConnectionsLock, driver, url, user,
                 password, dbSettings.shareLinkedConnections);
     }
 
@@ -2233,8 +2366,13 @@ public final class Database implements DataHandler, CastDataProvider {
     public SourceCompiler getCompiler() {
         if (compiler == null) {
             compiler = new SourceCompiler();
+            compilerLock = new ReentrantLock();
         }
         return compiler;
+    }
+
+    public Lock compilerLock() {
+        return Objects.requireNonNull(compilerLock, "compilerLock");
     }
 
     @Override
@@ -2362,7 +2500,8 @@ public final class Database implements DataHandler, CastDataProvider {
         if (javaObjectSerializerInitialized) {
             return;
         }
-        synchronized (this) {
+        dbLock.lock();
+        try {
             if (javaObjectSerializerInitialized) {
                 return;
             }
@@ -2380,14 +2519,19 @@ public final class Database implements DataHandler, CastDataProvider {
                 }
             }
             javaObjectSerializerInitialized = true;
+        } finally {
+            dbLock.unlock();
         }
     }
 
     public void setJavaObjectSerializerName(String serializerName) {
-        synchronized (this) {
+        dbLock.lock();
+        try {
             javaObjectSerializerInitialized = false;
             javaObjectSerializerName = serializerName;
             getNextRemoteSettingsId();
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -2398,7 +2542,7 @@ public final class Database implements DataHandler, CastDataProvider {
      * @return the class
      */
     public TableEngine getTableEngine(String tableEngine) {
-        assert Thread.holdsLock(this);
+        assert dbLock.isHeldByCurrentThread();
 
         TableEngine engine = tableEngines.get(tableEngine);
         if (engine == null) {

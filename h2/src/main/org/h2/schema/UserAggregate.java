@@ -8,6 +8,8 @@ package org.h2.schema;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.Aggregate;
 import org.h2.api.AggregateFunction;
 import org.h2.engine.DbObject;
@@ -25,10 +27,12 @@ import org.h2.value.TypeInfo;
 public final class UserAggregate extends UserDefinedFunction {
 
     private Class<?> javaClass;
+    private final Lock lock;
 
     public UserAggregate(Schema schema, int id, String name, String className,
             boolean force) {
         super(schema, id, name, Trace.FUNCTION);
+        this.lock = new ReentrantLock();
         this.className = className;
         if (!force) {
             getInstance();
@@ -73,11 +77,16 @@ public final class UserAggregate extends UserDefinedFunction {
     }
 
     @Override
-    public synchronized void removeChildrenAndResources(SessionLocal session) {
-        database.removeMeta(session, getId());
-        className = null;
-        javaClass = null;
-        invalidate();
+    public void removeChildrenAndResources(SessionLocal session) {
+        lock.lock();
+        try {
+            database.removeMeta(session, getId());
+            className = null;
+            javaClass = null;
+            invalidate();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

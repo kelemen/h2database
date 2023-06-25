@@ -16,9 +16,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.mvstore.type.DataType;
 import org.h2.mvstore.type.ObjectDataType;
 import org.h2.util.MemoryEstimator;
@@ -53,7 +57,8 @@ public class MVMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V
     private final K[] keysBuffer;
     private final V[] valuesBuffer;
 
-    private final Object lock = new Object();
+    private final Lock lock = new ReentrantLock();
+    private final Condition lockCondition = lock.newCondition();
     private volatile boolean notificationRequested;
 
     /**
@@ -1929,12 +1934,15 @@ public class MVMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V
                     throw new RuntimeException(ex);
                 }
             } else {
-                synchronized (lock) {
+                lock.lock();
+                try {
                     notificationRequested = true;
                     try {
-                        lock.wait(5);
+                        lockCondition.await(5, TimeUnit.MILLISECONDS);
                     } catch (InterruptedException ignore) {
                     }
+                } finally {
+                    lock.unlock();
                 }
             }
         }
@@ -1982,9 +1990,12 @@ public class MVMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V
 
     private void notifyWaiters() {
         if (notificationRequested) {
-            synchronized (lock) {
+            lock.lock();
+            try {
                 notificationRequested = false;
-                lock.notify();
+                lockCondition.signal();
+            } finally {
+                lock.unlock();
             }
         }
     }

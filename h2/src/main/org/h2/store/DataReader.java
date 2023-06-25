@@ -123,7 +123,7 @@ public class DataReader extends Reader {
         private static final long serialVersionUID = 1L;
 
         @Override
-        public synchronized Throwable fillInStackTrace() {
+        public Throwable fillInStackTrace() {
             return null;
         }
 

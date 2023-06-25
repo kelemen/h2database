@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.message.DbException;
 import org.h2.mvstore.DataUtils;
 import org.h2.store.fs.FileBaseDefault;
@@ -24,6 +26,7 @@ class FileSplit extends FileBaseDefault {
     private final long maxLength;
     private FileChannel[] list;
     private volatile long length;
+    private final Lock lock;
 
     FileSplit(FilePathSplit file, String mode, FileChannel[] list, long length,
             long maxLength) {
@@ -32,12 +35,18 @@ class FileSplit extends FileBaseDefault {
         this.list = list;
         this.length = length;
         this.maxLength = maxLength;
+        this.lock = new ReentrantLock();
     }
 
     @Override
-    public synchronized void implCloseChannel() throws IOException {
-        for (FileChannel c : list) {
-            c.close();
+    public void implCloseChannel() throws IOException {
+        lock.lock();
+        try {
+            for (FileChannel c : list) {
+                c.close();
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -47,20 +56,26 @@ class FileSplit extends FileBaseDefault {
     }
 
     @Override
-    public synchronized int read(ByteBuffer dst, long position)
+    public int read(ByteBuffer dst, long position)
             throws IOException {
-        int len = dst.remaining();
-        if (len == 0) {
-            return 0;
+
+        lock.lock();
+        try {
+            int len = dst.remaining();
+            if (len == 0) {
+                return 0;
+            }
+            len = (int) Math.min(len, length - position);
+            if (len <= 0) {
+                return -1;
+            }
+            long offset = position % maxLength;
+            len = (int) Math.min(len, maxLength - offset);
+            FileChannel channel = getFileChannel(position);
+            return channel.read(dst, offset);
+        } finally {
+            lock.unlock();
         }
-        len = (int) Math.min(len, length - position);
-        if (len <= 0) {
-            return -1;
-        }
-        long offset = position % maxLength;
-        len = (int) Math.min(len, maxLength - offset);
-        FileChannel channel = getFileChannel(position);
-        return channel.read(dst, offset);
     }
 
     private FileChannel getFileChannel(long position) throws IOException {
@@ -105,47 +120,62 @@ class FileSplit extends FileBaseDefault {
     }
 
     @Override
-    public synchronized void force(boolean metaData) throws IOException {
-        for (FileChannel c : list) {
-            c.force(metaData);
-        }
-    }
-
-    @Override
-    public synchronized int write(ByteBuffer src, long position) throws IOException {
-        if (position >= length && position > maxLength) {
-            // may need to extend and create files
-            long oldFilePointer = position;
-            long x = length - (length % maxLength) + maxLength;
-            for (; x < position; x += maxLength) {
-                if (x > length) {
-                    // expand the file size
-                    position(x - 1);
-                    write(ByteBuffer.wrap(new byte[1]));
-                }
-                position = oldFilePointer;
+    public void force(boolean metaData) throws IOException {
+        lock.lock();
+        try {
+            for (FileChannel c : list) {
+                c.force(metaData);
             }
+        } finally {
+            lock.unlock();
         }
-        long offset = position % maxLength;
-        int len = src.remaining();
-        FileChannel channel = getFileChannel(position);
-        int l = (int) Math.min(len, maxLength - offset);
-        if (l == len) {
-            l = channel.write(src, offset);
-        } else {
-            int oldLimit = src.limit();
-            src.limit(src.position() + l);
-            l = channel.write(src, offset);
-            src.limit(oldLimit);
-        }
-        length = Math.max(length, position + l);
-        return l;
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public int write(ByteBuffer src, long position) throws IOException {
+        lock.lock();
+        try {
+            if (position >= length && position > maxLength) {
+                // may need to extend and create files
+                long oldFilePointer = position;
+                long x = length - (length % maxLength) + maxLength;
+                for (; x < position; x += maxLength) {
+                    if (x > length) {
+                        // expand the file size
+                        position(x - 1);
+                        write(ByteBuffer.wrap(new byte[1]));
+                    }
+                    position = oldFilePointer;
+                }
+            }
+            long offset = position % maxLength;
+            int len = src.remaining();
+            FileChannel channel = getFileChannel(position);
+            int l = (int) Math.min(len, maxLength - offset);
+            if (l == len) {
+                l = channel.write(src, offset);
+            } else {
+                int oldLimit = src.limit();
+                src.limit(src.position() + l);
+                l = channel.write(src, offset);
+                src.limit(oldLimit);
+            }
+            length = Math.max(length, position + l);
+            return l;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
-        return list[0].tryLock(position, size, shared);
+        lock.lock();
+        try {
+            return list[0].tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

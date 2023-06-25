@@ -14,6 +14,8 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.TimerTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.Driver;
 import org.h2.engine.Constants;
 import org.h2.store.fs.FileUtils;
@@ -410,7 +412,8 @@ java org.h2.test.TestAll timer
     /**
      * The list of tests.
      */
-    ArrayList<TestBase> tests = new ArrayList<>();
+    final ArrayList<TestBase> tests = new ArrayList<>();
+    final Lock testsLock = new ReentrantLock();
 
     private Server server;
 
@@ -1004,11 +1007,14 @@ kill -9 `jps -l | grep "org.h2.test." | cut -d " " -f 1`
                 public void call() throws Exception {
                     while (true) {
                         TestBase test;
-                        synchronized (tests) {
+                        testsLock.lock();
+                        try {
                             if (tests.isEmpty()) {
                                 break;
                             }
                             test = tests.remove(0);
+                        } finally {
+                            testsLock.unlock();
                         }
                         if (!excludedTests.contains(test.getClass().getName())) {
                             test.runTest(TestAll.this);

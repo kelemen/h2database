@@ -11,6 +11,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.engine.SysProperties;
@@ -63,6 +65,7 @@ public class FileStore {
     private boolean checkedWriting = true;
     private final String mode;
     private java.nio.channels.FileLock lock;
+    private final Lock lockLock;
 
     /**
      * Create a new file using the given settings.
@@ -72,6 +75,7 @@ public class FileStore {
      * @param mode the access mode ("r", "rw", "rws", "rwd")
      */
     protected FileStore(DataHandler handler, String name, String mode) {
+        this.lockLock = new ReentrantLock();
         this.handler = handler;
         this.name = name;
         try {
@@ -485,27 +489,35 @@ public class FileStore {
      *
      * @return true if successful
      */
-    public synchronized boolean tryLock() {
+    public boolean tryLock() {
+        lockLock.lock();
         try {
             lock = file.tryLock();
             return lock != null;
         } catch (Exception e) {
             // ignore OverlappingFileLockException
             return false;
+        } finally {
+            lockLock.unlock();
         }
     }
 
     /**
      * Release the file lock.
      */
-    public synchronized void releaseLock() {
-        if (file != null && lock != null) {
-            try {
-                lock.release();
-            } catch (Exception e) {
-                // ignore
+    public void releaseLock() {
+        lockLock.lock();
+        try {
+            if (file != null && lock != null) {
+                try {
+                    lock.release();
+                } catch (Exception e) {
+                    // ignore
+                }
+                lock = null;
             }
-            lock = null;
+        } finally {
+            lockLock.unlock();
         }
     }
 

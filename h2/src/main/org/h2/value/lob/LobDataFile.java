@@ -8,6 +8,7 @@ package org.h2.value.lob;
 import java.io.BufferedInputStream;
 import java.io.InputStream;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.engine.Constants;
 import org.h2.engine.SysProperties;
 import org.h2.store.DataHandler;
@@ -45,8 +46,12 @@ public final class LobDataFile extends LobData {
             }
             // synchronize on the database, to avoid concurrent temp file
             // creation / deletion / backup
-            synchronized (handler.getLobSyncObject()) {
+            Lock lobSyncObject = handler.getLobSyncObject();
+            lobSyncObject.lock();
+            try {
                 FileUtils.delete(fileName);
+            } finally {
+                lobSyncObject.unlock();
             }
         }
     }

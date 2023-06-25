@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.expression.ParameterInterface;
@@ -116,7 +117,9 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
             int id = getNextId(TraceObject.RESULT_SET);
             debugCodeAssign("ResultSet", TraceObject.RESULT_SET, id, "executeQuery()");
             batchIdentities = null;
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 checkClosed();
                 closeOldResultSet();
                 ResultInterface result;
@@ -134,6 +137,8 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
                 }
                 resultSet = new JdbcResultSet(conn, this, command, result, id, scrollable, updatable,
                         cachedColumnLabelMap);
+            } finally {
+                sessionLock.unlock();
             }
             return resultSet;
         } catch (Exception e) {
@@ -203,7 +208,9 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
 
     private long executeUpdateInternal() {
         closeOldResultSet();
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             try {
                 setExecutingStatement(command);
                 ResultWithGeneratedKeys result = command.executeUpdate(generatedKeysRequest);
@@ -216,6 +223,8 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
             } finally {
                 setExecutingStatement(null);
             }
+        } finally {
+            sessionLock.unlock();
         }
         return updateCount;
     }
@@ -236,7 +245,9 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
             debugCodeCall("execute");
             checkClosed();
             boolean returnsResultSet;
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 closeOldResultSet();
                 boolean lazy = false;
                 try {
@@ -263,6 +274,8 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
                         setExecutingStatement(null);
                     }
                 }
+            } finally {
+                sessionLock.unlock();
             }
             return returnsResultSet;
         } catch (Throwable e) {

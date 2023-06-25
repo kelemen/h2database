@@ -11,6 +11,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.compress.CompressLZF;
 import org.h2.util.MathUtils;
 
@@ -40,6 +42,7 @@ class FileMemData {
     private boolean isReadOnly;
     private boolean isLockedExclusive;
     private int sharedLockCount;
+    private final Lock lock = new ReentrantLock();
 
     static {
         byte[] n = new byte[BLOCK_SIZE];
@@ -100,12 +103,17 @@ class FileMemData {
      *
      * @return if locking was successful
      */
-    synchronized boolean lockExclusive() {
-        if (sharedLockCount > 0 || isLockedExclusive) {
-            return false;
+    boolean lockExclusive() {
+        lock.lock();
+        try {
+            if (sharedLockCount > 0 || isLockedExclusive) {
+                return false;
+            }
+            isLockedExclusive = true;
+            return true;
+        } finally {
+            lock.unlock();
         }
-        isLockedExclusive = true;
-        return true;
     }
 
     /**
@@ -113,24 +121,34 @@ class FileMemData {
      *
      * @return if locking was successful
      */
-    synchronized boolean lockShared() {
-        if (isLockedExclusive) {
-            return false;
+    boolean lockShared() {
+        lock.lock();
+        try {
+            if (isLockedExclusive) {
+                return false;
+            }
+            sharedLockCount++;
+            return true;
+        } finally {
+            lock.unlock();
         }
-        sharedLockCount++;
-        return true;
     }
 
     /**
      * Unlock the file.
      */
-    synchronized void unlock() throws IOException {
-        if (isLockedExclusive) {
-            isLockedExclusive = false;
-        } else if (sharedLockCount > 0) {
-            sharedLockCount--;
-        } else {
-            throw new IOException("not locked");
+    void unlock() throws IOException {
+        lock.lock();
+        try {
+            if (isLockedExclusive) {
+                isLockedExclusive = false;
+            } else if (sharedLockCount > 0) {
+                sharedLockCount--;
+            } else {
+                throw new IOException("not locked");
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -141,15 +159,22 @@ class FileMemData {
 
         private static final long serialVersionUID = 1L;
         private final int size;
+        private final Lock cacheLock;
 
         Cache(int size) {
             super(size, (float) 0.75, true);
             this.size = size;
+            this.cacheLock = new ReentrantLock();
         }
 
         @Override
-        public synchronized V put(K key, V value) {
-            return super.put(key, value);
+        public V put(K key, V value) {
+            cacheLock.lock();
+            try {
+                return super.put(key, value);
+            } finally {
+                cacheLock.unlock();
+            }
         }
 
         @Override
@@ -198,8 +223,12 @@ class FileMemData {
         CompressItem c = new CompressItem();
         c.file = this;
         c.page = page;
-        synchronized (LZF) {
+        Lock compressorLock = LZF.compressorLock();
+        compressorLock.lock();
+        try {
             COMPRESS_LATER.put(c, c);
+        } finally {
+            compressorLock.unlock();
         }
     }
 
@@ -210,8 +239,12 @@ class FileMemData {
         }
         byte[] out = new byte[BLOCK_SIZE];
         if (d != COMPRESSED_EMPTY_BLOCK) {
-            synchronized (LZF) {
+            Lock compressorLock = LZF.compressorLock();
+            compressorLock.lock();
+            try {
                 LZF.expand(d, 0, d.length, out, 0, BLOCK_SIZE);
+            } finally {
+                compressorLock.unlock();
             }
         }
         setPage(page, d, out, false);
@@ -229,13 +262,17 @@ class FileMemData {
             // not yet initialized or already compressed
             return;
         }
-        synchronized (LZF) {
+        Lock compressorLock = LZF.compressorLock();
+        compressorLock.lock();
+        try {
             int len = LZF.compress(old, 0, BLOCK_SIZE, BUFFER, 0);
             if (len <= BLOCK_SIZE) {
                 byte[] d = Arrays.copyOf(BUFFER, len);
                 // maybe data was changed in the meantime
                 setPage(page, old, d, false);
             }
+        } finally {
+            compressorLock.unlock();
         }
     }
 

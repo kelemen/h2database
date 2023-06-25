@@ -7,6 +7,8 @@ package org.h2.engine;
 
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.command.CommandInterface;
 import org.h2.jdbc.meta.DatabaseMeta;
 import org.h2.message.Trace;
@@ -90,6 +92,7 @@ public abstract class Session implements CastDataProvider, AutoCloseable {
 
     }
 
+    private final ReentrantLock sessionLock;
     private ArrayList<String> sessionState;
 
     boolean sessionStateChanged;
@@ -99,6 +102,11 @@ public abstract class Session implements CastDataProvider, AutoCloseable {
     volatile StaticSettings staticSettings;
 
     Session() {
+        this.sessionLock = new ReentrantLock();
+    }
+
+    public ReentrantLock sessionLock() {
+        return sessionLock;
     }
 
     /**

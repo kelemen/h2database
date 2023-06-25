@@ -12,6 +12,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A scan resistant cache. It is meant to cache objects that are relatively
@@ -153,9 +155,13 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
         // check whether resize is required: synchronize on s, to avoid
         // concurrent resizes (concurrent reads read
         // from the old segment)
-        synchronized (s) {
+        Lock segmentLock = s.lock;
+        segmentLock.lock();
+        try {
             s = resizeIfNeeded(s, segmentIndex);
             return s.put(key, hash, value, memory);
+        } finally {
+            segmentLock.unlock();
         }
     }
 
@@ -224,9 +230,13 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
         // check whether resize is required: synchronize on s, to avoid
         // concurrent resizes (concurrent reads read
         // from the old segment)
-        synchronized (s) {
+        Lock segmentLock = s.lock;
+        segmentLock.lock();
+        try {
             s = resizeIfNeeded(s, segmentIndex);
             return s.remove(key, hash);
+        } finally {
+            segmentLock.unlock();
         }
     }
 
@@ -426,6 +436,7 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
      * @param <V> the value type
      */
     private static class Segment<K, V> {
+        final Lock lock = new ReentrantLock();
 
         /**
          * The number of (hot, cold, and non-resident) entries in the map.
@@ -661,44 +672,50 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
          *
          * @param key the key
          */
-        private synchronized void access(Object key, int hash) {
-            Entry<K, V> e = find(key, hash);
-            if (e == null || e.value == null) {
-                return;
-            }
-            if (e.isHot()) {
-                if (e != stack.stackNext) {
-                    if (stackMoveDistance == 0 ||
-                            stackMoveCounter - e.topMove > stackMoveDistance) {
-                        // move a hot entry to the top of the stack
-                        // unless it is already there
-                        boolean wasEnd = e == stack.stackPrev;
-                        removeFromStack(e);
-                        if (wasEnd) {
-                            // if moving the last entry, the last entry
-                            // could now be cold, which is not allowed
-                            pruneStack();
+        private void access(Object key, int hash) {
+            lock.lock();
+            try {
+
+                Entry<K, V> e = find(key, hash);
+                if (e == null || e.value == null) {
+                    return;
+                }
+                if (e.isHot()) {
+                    if (e != stack.stackNext) {
+                        if (stackMoveDistance == 0 ||
+                                stackMoveCounter - e.topMove > stackMoveDistance) {
+                            // move a hot entry to the top of the stack
+                            // unless it is already there
+                            boolean wasEnd = e == stack.stackPrev;
+                            removeFromStack(e);
+                            if (wasEnd) {
+                                // if moving the last entry, the last entry
+                                // could now be cold, which is not allowed
+                                pruneStack();
+                            }
+                            addToStack(e);
                         }
-                        addToStack(e);
                     }
-                }
-            } else {
-                removeFromQueue(e);
-                if (e.stackNext != null) {
-                    // resident cold entries become hot
-                    // if they are on the stack
-                    removeFromStack(e);
-                    // which means a hot entry needs to become cold
-                    // (this entry is cold, that means there is at least one
-                    // more entry in the stack, which must be hot)
-                    convertOldestHotToCold();
                 } else {
-                    // cold entries that are not on the stack
-                    // move to the front of the queue
-                    addToQueue(queue, e);
+                    removeFromQueue(e);
+                    if (e.stackNext != null) {
+                        // resident cold entries become hot
+                        // if they are on the stack
+                        removeFromStack(e);
+                        // which means a hot entry needs to become cold
+                        // (this entry is cold, that means there is at least one
+                        // more entry in the stack, which must be hot)
+                        convertOldestHotToCold();
+                    } else {
+                        // cold entries that are not on the stack
+                        // move to the front of the queue
+                        addToQueue(queue, e);
+                    }
+                    // in any case, the cold entry is moved to the top of the stack
+                    addToStack(e);
                 }
-                // in any case, the cold entry is moved to the top of the stack
-                addToStack(e);
+            } finally {
+                lock.unlock();
             }
         }
 
@@ -713,44 +730,50 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
          * @param memory the memory used for the given entry
          * @return the old value, or null if there was no resident entry
          */
-        synchronized V put(K key, int hash, V value, int memory) {
+        V put(K key, int hash, V value, int memory) {
             if (value == null) {
                 throw new NullPointerException("The value may not be null");
             }
-            V old;
-            Entry<K, V> e = find(key, hash);
-            if (e == null) {
-                old = null;
-            } else {
-                old = e.value;
-                remove(key, hash);
-            }
-            if (memory > maxMemory) {
-                // the new entry is too big to fit
-                return old;
-            }
-            e = new Entry<>();
-            e.key = key;
-            e.value = value;
-            e.memory = memory;
-            int index = hash & mask;
-            e.mapNext = entries[index];
-            entries[index] = e;
-            usedMemory += memory;
-            if (usedMemory > maxMemory) {
-                // old entries needs to be removed
-                evict();
-                // if the cache is full, the new entry is
-                // cold if possible
-                if (stackSize > 0) {
-                    // the new cold entry is at the top of the queue
-                    addToQueue(queue, e);
+
+            lock.lock();
+            try {
+                V old;
+                Entry<K, V> e = find(key, hash);
+                if (e == null) {
+                    old = null;
+                } else {
+                    old = e.value;
+                    remove(key, hash);
                 }
+                if (memory > maxMemory) {
+                    // the new entry is too big to fit
+                    return old;
+                }
+                e = new Entry<>();
+                e.key = key;
+                e.value = value;
+                e.memory = memory;
+                int index = hash & mask;
+                e.mapNext = entries[index];
+                entries[index] = e;
+                usedMemory += memory;
+                if (usedMemory > maxMemory) {
+                    // old entries needs to be removed
+                    evict();
+                    // if the cache is full, the new entry is
+                    // cold if possible
+                    if (stackSize > 0) {
+                        // the new cold entry is at the top of the queue
+                        addToQueue(queue, e);
+                    }
+                }
+                mapSize++;
+                // added entries are always added to the stack
+                addToStack(e);
+                return old;
+            } finally {
+                lock.unlock();
             }
-            mapSize++;
-            // added entries are always added to the stack
-            addToStack(e);
-            return old;
         }
 
         /**
@@ -761,48 +784,53 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
          * @param hash the hash
          * @return the old value, or null if there was no resident entry
          */
-        synchronized V remove(Object key, int hash) {
-            int index = hash & mask;
-            Entry<K, V> e = entries[index];
-            if (e == null) {
-                return null;
-            }
-            V old;
-            if (e.key.equals(key)) {
-                old = e.value;
-                entries[index] = e.mapNext;
-            } else {
-                Entry<K, V> last;
-                do {
-                    last = e;
-                    e = e.mapNext;
-                    if (e == null) {
-                        return null;
-                    }
-                } while (!e.key.equals(key));
-                old = e.value;
-                last.mapNext = e.mapNext;
-            }
-            mapSize--;
-            usedMemory -= e.memory;
-            if (e.stackNext != null) {
-                removeFromStack(e);
-            }
-            if (e.isHot()) {
-                // when removing a hot entry, the newest cold entry gets hot,
-                // so the number of hot entries does not change
-                e = queue.queueNext;
-                if (e != queue) {
-                    removeFromQueue(e);
-                    if (e.stackNext == null) {
-                        addToStackBottom(e);
-                    }
+        V remove(Object key, int hash) {
+            lock.lock();
+            try {
+                int index = hash & mask;
+                Entry<K, V> e = entries[index];
+                if (e == null) {
+                    return null;
                 }
-            } else {
-                removeFromQueue(e);
+                V old;
+                if (e.key.equals(key)) {
+                    old = e.value;
+                    entries[index] = e.mapNext;
+                } else {
+                    Entry<K, V> last;
+                    do {
+                        last = e;
+                        e = e.mapNext;
+                        if (e == null) {
+                            return null;
+                        }
+                    } while (!e.key.equals(key));
+                    old = e.value;
+                    last.mapNext = e.mapNext;
+                }
+                mapSize--;
+                usedMemory -= e.memory;
+                if (e.stackNext != null) {
+                    removeFromStack(e);
+                }
+                if (e.isHot()) {
+                    // when removing a hot entry, the newest cold entry gets hot,
+                    // so the number of hot entries does not change
+                    e = queue.queueNext;
+                    if (e != queue) {
+                        removeFromQueue(e);
+                        if (e.stackNext == null) {
+                            addToStackBottom(e);
+                        }
+                    }
+                } else {
+                    removeFromQueue(e);
+                }
+                pruneStack();
+                return old;
+            } finally {
+                lock.unlock();
             }
-            pruneStack();
-            return old;
         }
 
         /**
@@ -950,21 +978,26 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
          * @param nonResident true for non-resident entries
          * @return the key list
          */
-        synchronized List<K> keys(boolean cold, boolean nonResident) {
-            ArrayList<K> keys = new ArrayList<>();
-            if (cold) {
-                Entry<K, V> start = nonResident ? queue2 : queue;
-                for (Entry<K, V> e = start.queueNext; e != start;
-                        e = e.queueNext) {
-                    keys.add(e.key);
+        List<K> keys(boolean cold, boolean nonResident) {
+            lock.lock();
+            try {
+                ArrayList<K> keys = new ArrayList<>();
+                if (cold) {
+                    Entry<K, V> start = nonResident ? queue2 : queue;
+                    for (Entry<K, V> e = start.queueNext; e != start;
+                            e = e.queueNext) {
+                        keys.add(e.key);
+                    }
+                } else {
+                    for (Entry<K, V> e = stack.stackNext; e != stack;
+                            e = e.stackNext) {
+                        keys.add(e.key);
+                    }
                 }
-            } else {
-                for (Entry<K, V> e = stack.stackNext; e != stack;
-                        e = e.stackNext) {
-                    keys.add(e.key);
-                }
+                return keys;
+            } finally {
+                lock.unlock();
             }
-            return keys;
         }
 
         /**
@@ -985,15 +1018,20 @@ public class CacheLIRS<K, V> extends AbstractMap<K, V> {
          *
          * @return the set of keys
          */
-        synchronized Set<K> keySet() {
-            HashSet<K> set = new HashSet<>();
-            for (Entry<K, V> e = stack.stackNext; e != stack; e = e.stackNext) {
-                set.add(e.key);
+        Set<K> keySet() {
+            lock.lock();
+            try {
+                HashSet<K> set = new HashSet<>();
+                for (Entry<K, V> e = stack.stackNext; e != stack; e = e.stackNext) {
+                    set.add(e.key);
+                }
+                for (Entry<K, V> e = queue.queueNext; e != queue; e = e.queueNext) {
+                    set.add(e.key);
+                }
+                return set;
+            } finally {
+                lock.unlock();
             }
-            for (Entry<K, V> e = queue.queueNext; e != queue; e = e.queueNext) {
-                set.add(e.key);
-            }
-            return set;
         }
 
         /**

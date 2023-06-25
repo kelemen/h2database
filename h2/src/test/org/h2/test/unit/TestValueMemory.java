@@ -15,6 +15,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.Random;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.IntervalQualifier;
 import org.h2.engine.Constants;
 import org.h2.store.DataHandler;
@@ -69,6 +71,7 @@ public class TestValueMemory extends TestBase implements DataHandler {
 
     private static final long MAX_ABSOLUTE_DAY = DateTimeUtils.absoluteDayFromDateValue(DateTimeUtils.MAX_DATE_VALUE);
 
+    private final Lock lobSyncObject = new ReentrantLock();
     private final Random random = new Random(1);
     private final SmallLRUCache<String, String[]> lobFileListCache = SmallLRUCache
             .newInstance(128);
@@ -316,8 +319,8 @@ public class TestValueMemory extends TestBase implements DataHandler {
     }
 
     @Override
-    public Object getLobSyncObject() {
-        return this;
+    public Lock getLobSyncObject() {
+        return lobSyncObject;
     }
 
     @Override

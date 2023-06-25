@@ -26,6 +26,8 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Constants;
 import org.h2.engine.DbObject;
 import org.h2.engine.MetaRecord;
@@ -65,7 +67,7 @@ import org.h2.value.lob.LobDataDatabase;
  * Helps recovering a corrupted database.
  */
 public class Recover extends Tool implements DataHandler {
-
+    private final Lock lobSyncObject = new ReentrantLock();
     private String databaseName;
     private int storageId;
     private String storageName;
@@ -711,8 +713,8 @@ public class Recover extends Tool implements DataHandler {
      * INTERNAL
      */
     @Override
-    public Object getLobSyncObject() {
-        return this;
+    public Lock getLobSyncObject() {
+        return lobSyncObject;
     }
 
     /**

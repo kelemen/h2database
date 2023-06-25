@@ -6,6 +6,8 @@
 package org.h2.constraint;
 
 import java.util.HashSet;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
@@ -28,9 +30,11 @@ public class ConstraintCheck extends Constraint {
 
     private TableFilter filter;
     private Expression expr;
+    private final Lock lock;
 
     public ConstraintCheck(Schema schema, int id, String name, Table table) {
         super(schema, id, name, table);
+        this.lock = new ReentrantLock();
     }
 
     @Override
@@ -97,9 +101,12 @@ public class ConstraintCheck extends Constraint {
         boolean b;
         try {
             Value v;
-            synchronized (this) {
+            lock.lock();
+            try {
                 filter.set(newRow);
                 v = expr.getValue(session);
+            } finally {
+                lock.unlock();
             }
             // Both TRUE and NULL are ok
             b = v.isFalse();

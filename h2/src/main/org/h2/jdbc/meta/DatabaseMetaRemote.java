@@ -8,6 +8,7 @@ package org.h2.jdbc.meta;
 import java.io.IOException;
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SessionRemote;
 import org.h2.message.DbException;
@@ -330,7 +331,9 @@ public class DatabaseMetaRemote extends DatabaseMeta {
         if (session.isClosed()) {
             throw DbException.get(ErrorCode.DATABASE_CALLED_AT_SHUTDOWN);
         }
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             int objectId = session.getNextId();
             for (int i = 0, count = 0; i < transferList.size(); i++) {
                 Transfer transfer = transferList.get(i);
@@ -349,6 +352,8 @@ public class DatabaseMetaRemote extends DatabaseMeta {
                 }
             }
             return null;
+        } finally {
+            sessionLock.unlock();
         }
     }
 

@@ -5,6 +5,7 @@
  */
 package org.h2.command.ddl;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SessionLocal;
 import org.h2.expression.Expression;
@@ -75,8 +76,12 @@ public class SequenceOptions {
 
     public TypeInfo getDataType() {
         if (oldSequence != null) {
-            synchronized (oldSequence) {
+            Lock sequenceLock = oldSequence.sequenceLock();
+            sequenceLock.lock();
+            try {
                 copyFromOldSequence();
+            } finally {
+                sequenceLock.unlock();
             }
         }
         return dataType;

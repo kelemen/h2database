@@ -7,6 +7,8 @@ package org.h2.util;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * This class implements a small LRU object cache.
@@ -18,10 +20,16 @@ public class SmallLRUCache<K, V> extends LinkedHashMap<K, V> {
 
     private static final long serialVersionUID = 1L;
     private int size;
+    private final Lock cacheLock;
 
     private SmallLRUCache(int size) {
         super(size, (float) 0.75, true);
         this.size = size;
+        this.cacheLock = new ReentrantLock();
+    }
+
+    public Lock cacheLock() {
+        return cacheLock;
     }
 
     /**

@@ -24,6 +24,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -31,6 +33,7 @@ import java.util.zip.ZipInputStream;
  * This utility class contains miscellaneous functions.
  */
 public class Utils {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     /**
      * An 0-size byte array.
@@ -286,12 +289,17 @@ public class Utils {
     /**
      * Run Java memory garbage collection.
      */
-    public static synchronized void collectGarbage() {
-        Runtime runtime = Runtime.getRuntime();
-        long garbageCollectionCount = getGarbageCollectionCount();
-        while (garbageCollectionCount == getGarbageCollectionCount()) {
-            runtime.gc();
-            Thread.yield();
+    public static void collectGarbage() {
+        CLASS_LOCK.lock();
+        try {
+            Runtime runtime = Runtime.getRuntime();
+            long garbageCollectionCount = getGarbageCollectionCount();
+            while (garbageCollectionCount == getGarbageCollectionCount()) {
+                runtime.gc();
+                Thread.yield();
+            }
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 

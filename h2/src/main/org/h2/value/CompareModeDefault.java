@@ -8,6 +8,7 @@ package org.h2.value;
 import java.text.CollationKey;
 import java.text.Collator;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
 import org.h2.util.SmallLRUCache;
@@ -65,13 +66,17 @@ public class CompareModeDefault extends CompareMode {
     }
 
     private CollationKey getKey(String a) {
-        synchronized (collationKeys) {
+        Lock cacheLock = collationKeys.cacheLock();
+        cacheLock.lock();
+        try {
             CollationKey key = collationKeys.get(a);
             if (key == null) {
                 key = collator.getCollationKey(a);
                 collationKeys.put(a, key);
             }
             return key;
+        } finally {
+            cacheLock.unlock();
         }
     }
 

@@ -11,6 +11,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Arrays;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
 import org.h2.engine.Constants;
@@ -54,9 +56,11 @@ public final class TriggerObject extends SchemaObject {
     private String triggerClassName;
     private String triggerSource;
     private Trigger triggerCallback;
+    private final Lock lock;
 
     public TriggerObject(Schema schema, int id, String name, Table table) {
         super(schema, id, name, Trace.TRIGGER);
+        this.lock = new ReentrantLock();
         this.table = table;
         setTemporary(table.isTemporary());
     }
@@ -73,33 +77,40 @@ public final class TriggerObject extends SchemaObject {
         this.insteadOf = insteadOf;
     }
 
-    private synchronized void load() {
-        if (triggerCallback != null) {
-            return;
-        }
+    private void load() {
+        lock.lock();
         try {
-            SessionLocal sysSession = database.getSystemSession();
-            Connection c2 = sysSession.createConnection(false);
-            Object obj;
-            if (triggerClassName != null) {
-                obj = JdbcUtils.loadUserClass(triggerClassName).getDeclaredConstructor().newInstance();
-            } else {
-                obj = loadFromSource();
+            if (triggerCallback != null) {
+                return;
             }
-            triggerCallback = (Trigger) obj;
-            triggerCallback.init(c2, getSchema().getName(), getName(),
-                    table.getName(), before, typeMask);
-        } catch (Throwable e) {
-            // try again later
-            triggerCallback = null;
-            throw DbException.get(ErrorCode.ERROR_CREATING_TRIGGER_OBJECT_3, e, getName(),
-                triggerClassName != null ? triggerClassName : "..source..", e.toString());
+            try {
+                SessionLocal sysSession = database.getSystemSession();
+                Connection c2 = sysSession.createConnection(false);
+                Object obj;
+                if (triggerClassName != null) {
+                    obj = JdbcUtils.loadUserClass(triggerClassName).getDeclaredConstructor().newInstance();
+                } else {
+                    obj = loadFromSource();
+                }
+                triggerCallback = (Trigger) obj;
+                triggerCallback.init(c2, getSchema().getName(), getName(),
+                        table.getName(), before, typeMask);
+            } catch (Throwable e) {
+                // try again later
+                triggerCallback = null;
+                throw DbException.get(ErrorCode.ERROR_CREATING_TRIGGER_OBJECT_3, e, getName(),
+                        triggerClassName != null ? triggerClassName : "..source..", e.toString());
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
     private Trigger loadFromSource() {
         SourceCompiler compiler = database.getCompiler();
-        synchronized (compiler) {
+        Lock compilerLock = database.compilerLock();
+        compilerLock.lock();
+        try {
             String fullClassName = Constants.USER_PACKAGE + ".trigger." + getName();
             compiler.setSource(fullClassName, triggerSource);
             try {
@@ -117,6 +128,8 @@ public final class TriggerObject extends SchemaObject {
             } catch (Exception e) {
                 throw DbException.get(ErrorCode.SYNTAX_ERROR_1, e, triggerSource);
             }
+        } finally {
+            compilerLock.unlock();
         }
     }
 

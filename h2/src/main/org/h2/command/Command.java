@@ -8,6 +8,7 @@ package org.h2.command;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
@@ -180,7 +181,9 @@ public abstract class Command implements CommandInterface {
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
         //noinspection SynchronizationOnLocalVariableOrMethodParameter
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             session.startStatementWithinTransaction(this);
             Session oldSession = session.setThreadLocalSession();
             try {
@@ -229,6 +232,8 @@ public abstract class Command implements CommandInterface {
                     stop();
                 }
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 
@@ -239,7 +244,9 @@ public abstract class Command implements CommandInterface {
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
         //noinspection SynchronizationOnLocalVariableOrMethodParameter
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             commitIfNonTransactional();
             SessionLocal.Savepoint rollback = session.setSavepoint();
             session.startStatementWithinTransaction(this);
@@ -300,6 +307,8 @@ public abstract class Command implements CommandInterface {
                     }
                 }
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 

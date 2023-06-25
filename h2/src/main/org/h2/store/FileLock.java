@@ -17,6 +17,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Paths;
 import java.util.Properties;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.Driver;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
@@ -60,6 +62,8 @@ public class FileLock implements Runnable {
      */
     private volatile boolean locked;
 
+    private final Lock lockLock;
+
     /**
      * The number of milliseconds to sleep after checking a file.
      */
@@ -88,6 +92,7 @@ public class FileLock implements Runnable {
      * @param sleep the number of milliseconds to sleep
      */
     public FileLock(TraceSystem traceSystem, String fileName, int sleep) {
+        this.lockLock = new ReentrantLock();
         this.trace = traceSystem == null ?
                 null : traceSystem.getTrace(Trace.FILE_LOCK);
         this.fileName = fileName;
@@ -100,64 +105,74 @@ public class FileLock implements Runnable {
      * @param fileLockMethod the file locking method to use
      * @throws DbException if locking was not successful
      */
-    public synchronized void lock(FileLockMethod fileLockMethod) {
-        checkServer();
-        if (locked) {
-            throw DbException.getInternalError("already locked");
+    public void lock(FileLockMethod fileLockMethod) {
+        lockLock.lock();
+        try {
+            checkServer();
+            if (locked) {
+                throw DbException.getInternalError("already locked");
+            }
+            switch (fileLockMethod) {
+                case FILE:
+                    lockFile();
+                    break;
+                case SOCKET:
+                    lockSocket();
+                    break;
+                case FS:
+                case NO:
+                    break;
+            }
+            locked = true;
+        } finally {
+            lockLock.unlock();
         }
-        switch (fileLockMethod) {
-        case FILE:
-            lockFile();
-            break;
-        case SOCKET:
-            lockSocket();
-            break;
-        case FS:
-        case NO:
-            break;
-        }
-        locked = true;
     }
 
     /**
      * Unlock the file. The watchdog thread is stopped. This method does nothing
      * if the file is already unlocked.
      */
-    public synchronized void unlock() {
-        if (!locked) {
-            return;
-        }
-        locked = false;
+    public void unlock() {
+        lockLock.lock();
         try {
-            if (watchdog != null) {
-                watchdog.interrupt();
+            if (!locked) {
+                return;
             }
-        } catch (Exception e) {
-            trace.debug(e, "unlock");
-        }
-        try {
-            if (fileName != null) {
-                if (load().equals(properties)) {
-                    FileUtils.delete(fileName);
+            locked = false;
+            try {
+                if (watchdog != null) {
+                    watchdog.interrupt();
                 }
+            } catch (Exception e) {
+                trace.debug(e, "unlock");
             }
-            if (serverSocket != null) {
-                serverSocket.close();
+            try {
+                if (fileName != null) {
+                    if (load().equals(properties)) {
+                        FileUtils.delete(fileName);
+                    }
+                }
+                if (serverSocket != null) {
+                    serverSocket.close();
+                }
+            } catch (Exception e) {
+                trace.debug(e, "unlock");
+            } finally {
+                fileName = null;
+                serverSocket = null;
             }
-        } catch (Exception e) {
-            trace.debug(e, "unlock");
+            try {
+                if (watchdog != null) {
+                    watchdog.join();
+                }
+            } catch (Exception e) {
+                trace.debug(e, "unlock");
+            } finally {
+                watchdog = null;
+            }
         } finally {
-            fileName = null;
-            serverSocket = null;
-        }
-        try {
-            if (watchdog != null) {
-                watchdog.join();
-            }
-        } catch (Exception e) {
-            trace.debug(e, "unlock");
-        } finally {
-            watchdog = null;
+            lockLock.unlock();
         }
     }
 

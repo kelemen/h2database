@@ -21,6 +21,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.test.TestAll;
 import org.h2.test.TestBase;
@@ -32,6 +34,7 @@ import org.h2.util.Task;
  * Multi-threaded tests.
  */
 public class TestMultiThread extends TestDb implements Runnable {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private boolean stop;
     private TestMultiThread parent;
@@ -482,8 +485,11 @@ public class TestMultiThread extends TestDb implements Runnable {
                             }
                         } catch (SQLException e) {
                             error.set(true);
-                            synchronized (TestMultiThread.this) {
+                            CLASS_LOCK.lock();
+                            try {
                                 logError("Error in CHECK constraint", e);
+                            } finally {
+                                CLASS_LOCK.unlock();
                             }
                         }
                     }

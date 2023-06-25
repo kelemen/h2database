@@ -7,13 +7,15 @@ package org.h2.engine;
 
 import java.util.WeakHashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.message.Trace;
 
 /**
  * This class is responsible to close a database on JVM shutdown.
  */
 class OnExitDatabaseCloser extends Thread {
-
+    private static final Lock CLASS_LOCK = new ReentrantLock();
     private static final WeakHashMap<Database, Void> DATABASES = new WeakHashMap<>();
 
     private static final Thread INSTANCE = new OnExitDatabaseCloser();
@@ -27,27 +29,32 @@ class OnExitDatabaseCloser extends Thread {
      *
      * @param db Database instance.
      */
-    static synchronized void register(Database db) {
-        if (terminated) {
-            // Shutdown in progress
-            return;
-        }
-        DATABASES.put(db, null);
-        if (!registered) {
-            // Mark as registered unconditionally to avoid further attempts to register a
-            // shutdown hook in case of exception.
-            registered = true;
-            try {
-                Runtime.getRuntime().addShutdownHook(INSTANCE);
-            } catch (IllegalStateException e) {
-                // shutdown in progress - just don't register the handler
-                // (maybe an application wants to write something into a
-                // database at shutdown time)
-            } catch (SecurityException e) {
-                // applets may not do that - ignore
-                // Google App Engine doesn't allow
-                // to instantiate classes that extend Thread
+    static void register(Database db) {
+        CLASS_LOCK.lock();
+        try {
+            if (terminated) {
+                // Shutdown in progress
+                return;
             }
+            DATABASES.put(db, null);
+            if (!registered) {
+                // Mark as registered unconditionally to avoid further attempts to register a
+                // shutdown hook in case of exception.
+                registered = true;
+                try {
+                    Runtime.getRuntime().addShutdownHook(INSTANCE);
+                } catch (IllegalStateException e) {
+                    // shutdown in progress - just don't register the handler
+                    // (maybe an application wants to write something into a
+                    // database at shutdown time)
+                } catch (SecurityException e) {
+                    // applets may not do that - ignore
+                    // Google App Engine doesn't allow
+                    // to instantiate classes that extend Thread
+                }
+            }
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 
@@ -56,28 +63,36 @@ class OnExitDatabaseCloser extends Thread {
      *
      * @param db Database instance.
      */
-    static synchronized void unregister(Database db) {
-        if (terminated) {
-            // Shutdown in progress, do nothing
-            // This method can be called from the onShutdown()
-            return;
-        }
-        DATABASES.remove(db);
-        if (DATABASES.isEmpty() && registered) {
-            try {
-                Runtime.getRuntime().removeShutdownHook(INSTANCE);
-            } catch (IllegalStateException e) {
-                // ignore
-            } catch (SecurityException e) {
-                // applets may not do that - ignore
+    static void unregister(Database db) {
+        CLASS_LOCK.lock();
+        try {
+            if (terminated) {
+                // Shutdown in progress, do nothing
+                // This method can be called from the onShutdown()
+                return;
             }
-            registered = false;
+            DATABASES.remove(db);
+            if (DATABASES.isEmpty() && registered) {
+                try {
+                    Runtime.getRuntime().removeShutdownHook(INSTANCE);
+                } catch (IllegalStateException e) {
+                    // ignore
+                } catch (SecurityException e) {
+                    // applets may not do that - ignore
+                }
+                registered = false;
+            }
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 
     private static void onShutdown() {
-        synchronized(OnExitDatabaseCloser.class) {
+        CLASS_LOCK.lock();
+        try {
             terminated = true;
+        } finally {
+            CLASS_LOCK.unlock();
         }
         RuntimeException root = null;
         for (Database database : DATABASES.keySet()) {

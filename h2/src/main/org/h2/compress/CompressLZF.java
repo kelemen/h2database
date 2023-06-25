@@ -49,6 +49,8 @@
 package org.h2.compress;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * <p>
@@ -111,6 +113,12 @@ public final class CompressLZF implements Compressor {
      * Hash table for matching byte sequences (reused for performance).
      */
     private int[] cachedHashTable;
+
+    private final Lock compressorLock = new ReentrantLock();
+
+    public Lock compressorLock() {
+        return compressorLock;
+    }
 
     @Override
     public void setOptions(String options) {

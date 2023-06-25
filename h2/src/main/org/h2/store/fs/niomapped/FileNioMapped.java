@@ -15,6 +15,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.NonWritableChannelException;
 import java.nio.file.Paths;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.SysProperties;
 import org.h2.store.fs.FileBaseDefault;
 import org.h2.store.fs.FileUtils;
@@ -32,8 +34,10 @@ class FileNioMapped extends FileBaseDefault {
     private FileChannel channel;
     private MappedByteBuffer mapped;
     private long fileLength;
+    private final Lock lock;
 
     FileNioMapped(String fileName, String mode) throws IOException {
+        this.lock = new ReentrantLock();
         if ("r".equals(mode)) {
             this.mode = MapMode.READ_ONLY;
         } else {
@@ -117,31 +121,41 @@ class FileNioMapped extends FileBaseDefault {
     }
 
     @Override
-    public synchronized long size() throws IOException {
-        return fileLength;
+    public long size() throws IOException {
+        lock.lock();
+        try {
+            return fileLength;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
-    public synchronized int read(ByteBuffer dst, long pos) throws IOException {
+    public int read(ByteBuffer dst, long pos) throws IOException {
         checkFileSizeLimit(pos);
+        lock.lock();
         try {
-            int len = dst.remaining();
-            if (len == 0) {
-                return 0;
+            try {
+                int len = dst.remaining();
+                if (len == 0) {
+                    return 0;
+                }
+                len = (int) Math.min(len, fileLength - pos);
+                if (len <= 0) {
+                    return -1;
+                }
+                mapped.position((int)pos);
+                mapped.get(dst.array(), dst.arrayOffset() + dst.position(), len);
+                dst.position(dst.position() + len);
+                pos += len;
+                return len;
+            } catch (IllegalArgumentException | BufferUnderflowException e) {
+                EOFException e2 = new EOFException("EOF");
+                e2.initCause(e);
+                throw e2;
             }
-            len = (int) Math.min(len, fileLength - pos);
-            if (len <= 0) {
-                return -1;
-            }
-            mapped.position((int)pos);
-            mapped.get(dst.array(), dst.arrayOffset() + dst.position(), len);
-            dst.position(dst.position() + len);
-            pos += len;
-            return len;
-        } catch (IllegalArgumentException | BufferUnderflowException e) {
-            EOFException e2 = new EOFException("EOF");
-            e2.initCause(e);
-            throw e2;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -156,29 +170,34 @@ class FileNioMapped extends FileBaseDefault {
         }
     }
 
-    public synchronized void setFileLength(long newLength) throws IOException {
+    public void setFileLength(long newLength) throws IOException {
         if (mode == MapMode.READ_ONLY) {
             throw new NonWritableChannelException();
         }
         checkFileSizeLimit(newLength);
-        unMap();
-        for (int i = 0;; i++) {
-            try {
-                long length = channel.size();
-                if (length >= newLength) {
-                    channel.truncate(newLength);
-                } else {
-                    channel.write(ByteBuffer.wrap(new byte[1]), newLength - 1);
+        lock.lock();
+        try {
+            unMap();
+            for (int i = 0;; i++) {
+                try {
+                    long length = channel.size();
+                    if (length >= newLength) {
+                        channel.truncate(newLength);
+                    } else {
+                        channel.write(ByteBuffer.wrap(new byte[1]), newLength - 1);
+                    }
+                    break;
+                } catch (IOException e) {
+                    if (i > 16 || !e.toString().contains("user-mapped section open")) {
+                        throw e;
+                    }
                 }
-                break;
-            } catch (IOException e) {
-                if (i > 16 || !e.toString().contains("user-mapped section open")) {
-                    throw e;
-                }
+                System.gc();
             }
-            System.gc();
+            reMap();
+        } finally {
+            lock.unlock();
         }
-        reMap();
     }
 
     @Override
@@ -188,22 +207,31 @@ class FileNioMapped extends FileBaseDefault {
     }
 
     @Override
-    public synchronized int write(ByteBuffer src, long position) throws IOException {
+    public int write(ByteBuffer src, long position) throws IOException {
         checkFileSizeLimit(position);
-        int len = src.remaining();
-        // check if need to expand file
-        if (mapped.capacity() < position + len) {
-            setFileLength(position + len);
+        lock.lock();
+        try {
+            int len = src.remaining();
+            // check if need to expand file
+            if (mapped.capacity() < position + len) {
+                setFileLength(position + len);
+            }
+            mapped.position((int)position);
+            mapped.put(src);
+            return len;
+        } finally {
+            lock.unlock();
         }
-        mapped.position((int)position);
-        mapped.put(src);
-        return len;
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
-            boolean shared) throws IOException {
-        return channel.tryLock(position, size, shared);
+    public FileLock tryLock(long position, long size, boolean shared) throws IOException {
+        lock.lock();
+        try {
+            return channel.tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
 }

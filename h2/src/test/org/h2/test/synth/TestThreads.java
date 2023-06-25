@@ -12,6 +12,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Random;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.test.TestBase;
 import org.h2.test.TestDb;
 
@@ -33,6 +35,7 @@ public class TestThreads extends TestDb implements Runnable {
     private int type;
     private String table;
     private final Random random = new Random();
+    private final Lock lock = new ReentrantLock();
 
     public TestThreads() {
         // nothing to do
@@ -115,8 +118,13 @@ public class TestThreads extends TestDb implements Runnable {
         return maxId;
     }
 
-    private synchronized int incrementMaxId() {
-        return maxId++;
+    private int incrementMaxId() {
+        lock.lock();
+        try {
+            return maxId++;
+        } finally {
+            lock.unlock();
+        }
     }
 
     private String getRandomTable() {

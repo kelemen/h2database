@@ -19,6 +19,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.TimeUnit;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.DatabaseEventListener;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
@@ -32,6 +34,7 @@ import org.h2.util.Task;
  * Tests opening and closing a database.
  */
 public class TestOpenClose extends TestDb {
+    private final Lock lock = new ReentrantLock();
 
     private int nextId = 10;
 
@@ -214,8 +217,13 @@ public class TestOpenClose extends TestDb {
         conn.close();
     }
 
-    synchronized int getNextId() {
-        return nextId++;
+    int getNextId() {
+        lock.lock();
+        try {
+            return nextId++;
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void test1_1() throws IOException {

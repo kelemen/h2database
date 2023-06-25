@@ -7,6 +7,8 @@ package org.h2.jdbcx;
 
 import java.util.Hashtable;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.naming.Context;
 import javax.naming.Name;
 import javax.naming.Reference;
@@ -25,6 +27,7 @@ public final class JdbcDataSourceFactory implements ObjectFactory {
 
     private static final TraceSystem traceSystem;
 
+    private final Lock factoryLock;
     private final Trace trace;
 
     static {
@@ -37,6 +40,7 @@ public final class JdbcDataSourceFactory implements ObjectFactory {
      * The public constructor to create new factory objects.
      */
     public JdbcDataSourceFactory() {
+        factoryLock = new ReentrantLock();
         trace = traceSystem.getTrace(Trace.JDBCX);
     }
 
@@ -53,26 +57,31 @@ public final class JdbcDataSourceFactory implements ObjectFactory {
      *         not JdbcDataSource.
      */
     @Override
-    public synchronized Object getObjectInstance(Object obj, Name name,
+    public Object getObjectInstance(Object obj, Name name,
             Context nameCtx, Hashtable<?, ?> environment) {
-        if (trace.isDebugEnabled()) {
-            trace.debug("getObjectInstance obj={0} name={1} " +
-                    "nameCtx={2} environment={3}", obj, name, nameCtx, environment);
-        }
-        if (obj instanceof Reference) {
-            Reference ref = (Reference) obj;
-            if (ref.getClassName().equals(JdbcDataSource.class.getName())) {
-                JdbcDataSource dataSource = new JdbcDataSource();
-                dataSource.setURL((String) ref.get("url").getContent());
-                dataSource.setUser((String) ref.get("user").getContent());
-                dataSource.setPassword((String) ref.get("password").getContent());
-                dataSource.setDescription((String) ref.get("description").getContent());
-                String s = (String) ref.get("loginTimeout").getContent();
-                dataSource.setLoginTimeout(Integer.parseInt(s));
-                return dataSource;
+        factoryLock.lock();
+        try {
+            if (trace.isDebugEnabled()) {
+                trace.debug("getObjectInstance obj={0} name={1} " +
+                        "nameCtx={2} environment={3}", obj, name, nameCtx, environment);
             }
+            if (obj instanceof Reference) {
+                Reference ref = (Reference) obj;
+                if (ref.getClassName().equals(JdbcDataSource.class.getName())) {
+                    JdbcDataSource dataSource = new JdbcDataSource();
+                    dataSource.setURL((String) ref.get("url").getContent());
+                    dataSource.setUser((String) ref.get("user").getContent());
+                    dataSource.setPassword((String) ref.get("password").getContent());
+                    dataSource.setDescription((String) ref.get("description").getContent());
+                    String s = (String) ref.get("loginTimeout").getContent();
+                    dataSource.setLoginTimeout(Integer.parseInt(s));
+                    return dataSource;
+                }
+            }
+            return null;
+        } finally {
+            factoryLock.unlock();
         }
-        return null;
     }
 
     /**

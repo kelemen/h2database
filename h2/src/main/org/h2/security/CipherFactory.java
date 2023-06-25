@@ -29,6 +29,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.net.ServerSocketFactory;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
@@ -47,6 +49,7 @@ import org.h2.util.StringUtils;
  * A factory to create new block cipher objects.
  */
 public class CipherFactory {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     /**
      * The default password to use for the .h2.keystore file
@@ -200,14 +203,19 @@ public class CipherFactory {
      * Later changes to this property will not have any effect on server socket
      * behavior.
      */
-    public static synchronized void removeAnonFromLegacyAlgorithms() {
-        String legacyOriginal = getLegacyAlgorithmsSilently();
-        if (legacyOriginal == null) {
-            return;
-        }
-        String legacyNew = removeDhAnonFromCommaSeparatedList(legacyOriginal);
-        if (!legacyOriginal.equals(legacyNew)) {
-            setLegacyAlgorithmsSilently(legacyNew);
+    public static void removeAnonFromLegacyAlgorithms() {
+        CLASS_LOCK.lock();
+        try {
+            String legacyOriginal = getLegacyAlgorithmsSilently();
+            if (legacyOriginal == null) {
+                return;
+            }
+            String legacyNew = removeDhAnonFromCommaSeparatedList(legacyOriginal);
+            if (!legacyOriginal.equals(legacyNew)) {
+                setLegacyAlgorithmsSilently(legacyNew);
+            }
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 
@@ -220,8 +228,13 @@ public class CipherFactory {
      * socket behavior.
      * @see #removeAnonFromLegacyAlgorithms()
      */
-    public static synchronized void resetDefaultLegacyAlgorithms() {
-        setLegacyAlgorithmsSilently(DEFAULT_LEGACY_ALGORITHMS);
+    public static void resetDefaultLegacyAlgorithms() {
+        CLASS_LOCK.lock();
+        try {
+            setLegacyAlgorithmsSilently(DEFAULT_LEGACY_ALGORITHMS);
+        } finally {
+            CLASS_LOCK.unlock();
+        }
     }
 
     /**

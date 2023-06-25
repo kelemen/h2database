@@ -11,6 +11,9 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileUtils;
 import org.h2.util.IOUtils;
 
@@ -25,6 +28,8 @@ public class FtpData extends Thread {
     private volatile Socket socket;
     private final boolean active;
     private final int port;
+    private final Lock lock = new ReentrantLock();
+    private final Condition lockCondition = lock.newCondition();
 
     FtpData(FtpServer server, InetAddress address, ServerSocket serverSocket) {
         this.server = server;
@@ -44,16 +49,19 @@ public class FtpData extends Thread {
     @Override
     public void run() {
         try {
-            synchronized (this) {
+            lock.lock();
+            try {
                 Socket s = serverSocket.accept();
                 if (s.getInetAddress().equals(address)) {
                     server.trace("Data connected:" + s.getInetAddress() + " expected:" + address);
                     socket = s;
-                    notifyAll();
+                    lockCondition.signalAll();
                 } else {
                     server.trace("Data REJECTED:" + s.getInetAddress() + " expected:" + address);
                     close();
                 }
+            } finally {
+                lock.unlock();
             }
         } catch (IOException e) {
             e.printStackTrace();
@@ -71,7 +79,7 @@ public class FtpData extends Thread {
     private void waitUntilConnected() {
         while (serverSocket != null && socket == null) {
             try {
-                wait();
+                lockCondition.await();
             } catch (InterruptedException e) {
                 // ignore
             }
@@ -92,17 +100,22 @@ public class FtpData extends Thread {
      *
      * @param fileName the target file name
      */
-    synchronized void receive(String fileName) throws IOException {
-        connect();
+    void receive(String fileName) throws IOException {
+        lock.lock();
         try {
-            InputStream in = socket.getInputStream();
-            OutputStream out = FileUtils.newOutputStream(fileName, false);
-            IOUtils.copy(in, out);
-            out.close();
+            connect();
+            try {
+                InputStream in = socket.getInputStream();
+                OutputStream out = FileUtils.newOutputStream(fileName, false);
+                IOUtils.copy(in, out);
+                out.close();
+            } finally {
+                socket.close();
+            }
+            server.trace("closed");
         } finally {
-            socket.close();
+            lock.unlock();
         }
-        server.trace("closed");
     }
 
     /**
@@ -112,18 +125,23 @@ public class FtpData extends Thread {
      * @param fileName the source file name
      * @param skip the number of bytes to skip
      */
-    synchronized void send(String fileName, long skip) throws IOException {
-        connect();
+    void send(String fileName, long skip) throws IOException {
+        lock.lock();
         try {
-            OutputStream out = socket.getOutputStream();
-            InputStream in = FileUtils.newInputStream(fileName);
-            IOUtils.skipFully(in, skip);
-            IOUtils.copy(in, out);
-            in.close();
+            connect();
+            try {
+                OutputStream out = socket.getOutputStream();
+                InputStream in = FileUtils.newInputStream(fileName);
+                IOUtils.skipFully(in, skip);
+                IOUtils.copy(in, out);
+                in.close();
+            } finally {
+                socket.close();
+            }
+            server.trace("closed");
         } finally {
-            socket.close();
+            lock.unlock();
         }
-        server.trace("closed");
     }
 
     /**
@@ -131,15 +149,20 @@ public class FtpData extends Thread {
      *
      * @param data the data to send
      */
-    synchronized void send(byte[] data) throws IOException {
-        connect();
+    void send(byte[] data) throws IOException {
+        lock.lock();
         try {
-            OutputStream out = socket.getOutputStream();
-            out.write(data);
+            connect();
+            try {
+                OutputStream out = socket.getOutputStream();
+                out.write(data);
+            } finally {
+                socket.close();
+            }
+            server.trace("closed");
         } finally {
-            socket.close();
+            lock.unlock();
         }
-        server.trace("closed");
     }
 
 }

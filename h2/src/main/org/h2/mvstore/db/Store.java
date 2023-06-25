@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.ddl.CreateTableData;
 import org.h2.engine.Constants;
@@ -81,6 +83,8 @@ public final class Store {
 
     private final String fileName;
 
+    private final Lock lock;
+
     /**
      * Creates the store.
      *
@@ -88,6 +92,7 @@ public final class Store {
      * @param key for file encryption
      */
     public Store(Database db, byte[] key) {
+        lock = new ReentrantLock();
         String dbPath = db.getDatabasePath();
         MVStore.Builder builder = new MVStore.Builder();
         boolean encrypted = false;
@@ -282,8 +287,13 @@ public final class Store {
      *
      * @return the map name
      */
-    public synchronized String nextTemporaryMapName() {
-        return "temp." + temporaryMapId++;
+    public String nextTemporaryMapName() {
+        lock.lock();
+        try {
+            return "temp." + temporaryMapId++;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

@@ -8,6 +8,8 @@ package org.h2.table;
 import java.sql.ResultSetMetaData;
 import java.util.Objects;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.Parser;
 import org.h2.command.ddl.SequenceOptions;
@@ -59,6 +61,7 @@ public final class Column implements HasSQL, Typed, ColumnTemplate {
     public static final int NULLABLE_UNKNOWN =
             ResultSetMetaData.columnNullableUnknown;
 
+    private final Lock lock = new ReentrantLock();
     private TypeInfo type;
     private Table table;
     private String name;
@@ -389,13 +392,16 @@ public final class Column implements HasSQL, Typed, ColumnTemplate {
             value = ValueNull.INSTANCE;
         } else {
             if (isGeneratedAlways) {
-                synchronized (this) {
+                lock.lock();
+                try {
                     generatedTableFilter.set(row);
                     try {
                         value = localDefaultExpression.getValue(session);
                     } finally {
                         generatedTableFilter.set(null);
                     }
+                } finally {
+                    lock.unlock();
                 }
             } else {
                 value = localDefaultExpression.getValue(session);

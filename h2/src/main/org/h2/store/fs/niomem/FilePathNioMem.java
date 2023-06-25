@@ -9,6 +9,8 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.store.fs.FilePath;
@@ -21,6 +23,7 @@ public class FilePathNioMem extends FilePath {
 
     private static final TreeMap<String, FileNioMemData> MEMORY_FILES =
             new TreeMap<>();
+    private static final Lock MEMORY_FILES_LOCK = new ReentrantLock();
 
     /**
      * The percentage of uncompressed (cached) entries.
@@ -41,7 +44,8 @@ public class FilePathNioMem extends FilePath {
 
     @Override
     public void moveTo(FilePath newName, boolean atomicReplace) {
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             if (!atomicReplace && !name.equals(newName.name) &&
                     MEMORY_FILES.containsKey(newName.name)) {
                 throw DbException.get(ErrorCode.FILE_RENAME_FAILED_2, name, newName + " (exists)");
@@ -50,16 +54,21 @@ public class FilePathNioMem extends FilePath {
             f.setName(newName.name);
             MEMORY_FILES.remove(name);
             MEMORY_FILES.put(newName.name, f);
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
     @Override
     public boolean createFile() {
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             if (exists()) {
                 return false;
             }
             getMemoryFile();
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
         return true;
     }
@@ -69,8 +78,11 @@ public class FilePathNioMem extends FilePath {
         if (isRoot()) {
             return true;
         }
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             return MEMORY_FILES.get(name) != null;
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
@@ -79,15 +91,19 @@ public class FilePathNioMem extends FilePath {
         if (isRoot()) {
             return;
         }
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             MEMORY_FILES.remove(name);
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
     @Override
     public List<FilePath> newDirectoryStream() {
         ArrayList<FilePath> list = new ArrayList<>();
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             for (String n : MEMORY_FILES.tailMap(name).keySet()) {
                 if (n.startsWith(name)) {
                     list.add(getPath(n));
@@ -96,6 +112,8 @@ public class FilePathNioMem extends FilePath {
                 }
             }
             return list;
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
@@ -122,8 +140,11 @@ public class FilePathNioMem extends FilePath {
         }
         // TODO in memory file system currently
         // does not really support directories
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             return MEMORY_FILES.get(name) == null;
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
@@ -134,8 +155,11 @@ public class FilePathNioMem extends FilePath {
         }
         // TODO in memory file system currently
         // does not really support directories
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             return MEMORY_FILES.get(name) != null;
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 
@@ -171,13 +195,16 @@ public class FilePathNioMem extends FilePath {
     }
 
     private FileNioMemData getMemoryFile() {
-        synchronized (MEMORY_FILES) {
+        MEMORY_FILES_LOCK.lock();
+        try {
             FileNioMemData m = MEMORY_FILES.get(name);
             if (m == null) {
                 m = new FileNioMemData(name, compressed(), compressLaterCachePercent);
                 MEMORY_FILES.put(name, m);
             }
             return m;
+        } finally {
+            MEMORY_FILES_LOCK.unlock();
         }
     }
 

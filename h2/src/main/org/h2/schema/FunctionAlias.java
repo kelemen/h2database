@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.Driver;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
@@ -53,6 +55,7 @@ public final class FunctionAlias extends UserDefinedFunction {
     private String source;
     private JavaMethod[] javaMethods;
     private boolean deterministic;
+    private final Lock lock = new ReentrantLock();
 
     private FunctionAlias(Schema schema, int id, String name) {
         super(schema, id, name, Trace.FUNCTION);
@@ -114,20 +117,27 @@ public final class FunctionAlias extends UserDefinedFunction {
         }
     }
 
-    private synchronized void load() {
-        if (javaMethods != null) {
-            return;
-        }
-        if (source != null) {
-            loadFromSource();
-        } else {
-            loadClass();
+    private void load() {
+        lock.lock();
+        try {
+            if (javaMethods != null) {
+                return;
+            }
+            if (source != null) {
+                loadFromSource();
+            } else {
+                loadClass();
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
     private void loadFromSource() {
         SourceCompiler compiler = database.getCompiler();
-        synchronized (compiler) {
+        Lock compilerLock = database.compilerLock();
+        compilerLock.lock();
+        try {
             String fullClassName = Constants.USER_PACKAGE + "." + getName();
             compiler.setSource(fullClassName, source);
             try {
@@ -141,6 +151,8 @@ public final class FunctionAlias extends UserDefinedFunction {
             } catch (Exception e) {
                 throw DbException.get(ErrorCode.SYNTAX_ERROR_1, e, source);
             }
+        } finally {
+            compilerLock.unlock();
         }
     }
 
@@ -225,12 +237,17 @@ public final class FunctionAlias extends UserDefinedFunction {
     }
 
     @Override
-    public synchronized void removeChildrenAndResources(SessionLocal session) {
-        database.removeMeta(session, getId());
-        className = null;
-        methodName = null;
-        javaMethods = null;
-        invalidate();
+    public void removeChildrenAndResources(SessionLocal session) {
+        lock.lock();
+        try {
+            database.removeMeta(session, getId());
+            className = null;
+            methodName = null;
+            javaMethods = null;
+            invalidate();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

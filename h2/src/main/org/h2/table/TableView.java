@@ -9,6 +9,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.Prepared;
 import org.h2.command.ddl.CreateTableData;
@@ -40,6 +42,7 @@ public final class TableView extends QueryExpressionTable {
     private ResultInterface recursiveResult;
     private boolean isRecursiveQueryDetected;
     private boolean isTableExpression;
+    private final Lock lock = new ReentrantLock();
 
     public TableView(Schema schema, int id, String name, String querySQL,
             ArrayList<Parameter> params, Column[] columnTemplates, SessionLocal session,
@@ -75,16 +78,21 @@ public final class TableView extends QueryExpressionTable {
         }
     }
 
-    private synchronized void init(String querySQL, ArrayList<Parameter> params,
+    private void init(String querySQL, ArrayList<Parameter> params,
             Column[] columnTemplates, SessionLocal session, boolean allowRecursive, boolean literalsChecked,
             boolean isTableExpression) {
-        this.querySQL = querySQL;
-        this.columnTemplates = columnTemplates;
-        this.allowRecursive = allowRecursive;
-        this.isRecursiveQueryDetected = false;
-        this.isTableExpression = isTableExpression;
-        index = new QueryExpressionIndex(this, querySQL, params, allowRecursive);
-        initColumnsAndTables(session, literalsChecked);
+        lock.lock();
+        try {
+            this.querySQL = querySQL;
+            this.columnTemplates = columnTemplates;
+            this.allowRecursive = allowRecursive;
+            this.isRecursiveQueryDetected = false;
+            this.isTableExpression = isTableExpression;
+            index = new QueryExpressionIndex(this, querySQL, params, allowRecursive);
+            initColumnsAndTables(session, literalsChecked);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private Query compileViewQuery(SessionLocal session, String sql, boolean literalsChecked) {
@@ -115,27 +123,33 @@ public final class TableView extends QueryExpressionTable {
      * @return the exception if re-compiling this or any dependent view failed
      *         (only when force is disabled)
      */
-    public synchronized DbException recompile(SessionLocal session, boolean force,
+    public DbException recompile(SessionLocal session, boolean force,
             boolean clearIndexCache) {
+
+        lock.lock();
         try {
-            compileViewQuery(session, querySQL, false);
-        } catch (DbException e) {
-            if (!force) {
-                return e;
+            try {
+                compileViewQuery(session, querySQL, false);
+            } catch (DbException e) {
+                if (!force) {
+                    return e;
+                }
             }
-        }
-        ArrayList<TableView> dependentViews = new ArrayList<>(getDependentViews());
-        initColumnsAndTables(session, false);
-        for (TableView v : dependentViews) {
-            DbException e = v.recompile(session, force, false);
-            if (e != null && !force) {
-                return e;
+            ArrayList<TableView> dependentViews = new ArrayList<>(getDependentViews());
+            initColumnsAndTables(session, false);
+            for (TableView v : dependentViews) {
+                DbException e = v.recompile(session, force, false);
+                if (e != null && !force) {
+                    return e;
+                }
             }
+            if (clearIndexCache) {
+                clearIndexCaches(database);
+            }
+            return force ? null : createException;
+        } finally {
+            lock.unlock();
         }
-        if (clearIndexCache) {
-            clearIndexCaches(database);
-        }
-        return force ? null : createException;
     }
 
     private void initColumnsAndTables(SessionLocal session, boolean literalsChecked) {
@@ -483,8 +497,12 @@ public final class TableView extends QueryExpressionTable {
         if (!isTemporary) {
             // this unlock is to prevent lock leak from schema.createTable()
             db.unlockMeta(targetSession);
-            synchronized (targetSession) {
+            Lock sessionLock = targetSession.sessionLock();
+            sessionLock.lock();
+            try {
                 db.addSchemaObject(targetSession, recursiveTable);
+            } finally {
+                sessionLock.unlock();
             }
         } else {
             targetSession.addLocalTempTable(recursiveTable);

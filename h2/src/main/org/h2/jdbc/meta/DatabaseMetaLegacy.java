@@ -9,6 +9,7 @@ import java.sql.DatabaseMetaData;
 import java.util.ArrayList;
 import java.util.Arrays;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.engine.Constants;
@@ -650,7 +651,9 @@ public final class DatabaseMetaLegacy extends DatabaseMetaLocalBase {
 
     private ResultInterface executeQuery(String sql, Value... args) {
         checkClosed();
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             CommandInterface command = session.prepareCommand(sql, Integer.MAX_VALUE);
             int l = args.length;
             if (l > 0) {
@@ -662,6 +665,8 @@ public final class DatabaseMetaLegacy extends DatabaseMetaLocalBase {
             ResultInterface result = command.executeQuery(0, false);
             command.close();
             return result;
+        } finally {
+            sessionLock.unlock();
         }
     }
 

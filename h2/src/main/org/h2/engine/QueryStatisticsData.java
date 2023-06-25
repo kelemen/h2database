@@ -12,6 +12,8 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Maintains query statistics.
@@ -21,25 +23,37 @@ public class QueryStatisticsData {
     private static final Comparator<QueryEntry> QUERY_ENTRY_COMPARATOR =
             Comparator.comparingLong(q -> q.lastUpdateTime);
 
+    private final Lock lock;
     private final HashMap<String, QueryEntry> map = new HashMap<>();
 
     private int maxQueryEntries;
 
     public QueryStatisticsData(int maxQueryEntries) {
+        this.lock = new ReentrantLock();
         this.maxQueryEntries = maxQueryEntries;
     }
 
-    public synchronized void setMaxQueryEntries(int maxQueryEntries) {
-        this.maxQueryEntries = maxQueryEntries;
+    public void setMaxQueryEntries(int maxQueryEntries) {
+        lock.lock();
+        try {
+            this.maxQueryEntries = maxQueryEntries;
+        } finally {
+            lock.unlock();
+        }
     }
 
-    public synchronized List<QueryEntry> getQueries() {
-        // return a copy of the map so we don't have to
-        // worry about external synchronization
-        ArrayList<QueryEntry> list = new ArrayList<>(map.values());
-        // only return the newest 100 entries
-        list.sort(QUERY_ENTRY_COMPARATOR);
-        return list.subList(0, Math.min(list.size(), maxQueryEntries));
+    public List<QueryEntry> getQueries() {
+        lock.lock();
+        try {
+            // return a copy of the map so we don't have to
+            // worry about external synchronization
+            ArrayList<QueryEntry> list = new ArrayList<>(map.values());
+            // only return the newest 100 entries
+            list.sort(QUERY_ENTRY_COMPARATOR);
+            return list.subList(0, Math.min(list.size(), maxQueryEntries));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -50,32 +64,37 @@ public class QueryStatisticsData {
      *            to execute
      * @param rowCount the query or update row count
      */
-    public synchronized void update(String sqlStatement, long executionTimeNanos, long rowCount) {
-        QueryEntry entry = map.get(sqlStatement);
-        if (entry == null) {
-            entry = new QueryEntry(sqlStatement);
-            map.put(sqlStatement, entry);
-        }
-        entry.update(executionTimeNanos, rowCount);
+    public void update(String sqlStatement, long executionTimeNanos, long rowCount) {
+        lock.lock();
+        try {
+            QueryEntry entry = map.get(sqlStatement);
+            if (entry == null) {
+                entry = new QueryEntry(sqlStatement);
+                map.put(sqlStatement, entry);
+            }
+            entry.update(executionTimeNanos, rowCount);
 
-        // Age-out the oldest entries if the map gets too big.
-        // Test against 1.5 x max-size so we don't do this too often
-        if (map.size() > maxQueryEntries * 1.5f) {
-            // Sort the entries by age
-            ArrayList<QueryEntry> list = new ArrayList<>(map.values());
-            list.sort(QUERY_ENTRY_COMPARATOR);
-            // Create a set of the oldest 1/3 of the entries
-            HashSet<QueryEntry> oldestSet =
-                    new HashSet<>(list.subList(0, list.size() / 3));
-            // Loop over the map using the set and remove
-            // the oldest 1/3 of the entries.
-            for (Iterator<Entry<String, QueryEntry>> it =
-                    map.entrySet().iterator(); it.hasNext();) {
-                Entry<String, QueryEntry> mapEntry = it.next();
-                if (oldestSet.contains(mapEntry.getValue())) {
-                    it.remove();
+            // Age-out the oldest entries if the map gets too big.
+            // Test against 1.5 x max-size so we don't do this too often
+            if (map.size() > maxQueryEntries * 1.5f) {
+                // Sort the entries by age
+                ArrayList<QueryEntry> list = new ArrayList<>(map.values());
+                list.sort(QUERY_ENTRY_COMPARATOR);
+                // Create a set of the oldest 1/3 of the entries
+                HashSet<QueryEntry> oldestSet =
+                        new HashSet<>(list.subList(0, list.size() / 3));
+                // Loop over the map using the set and remove
+                // the oldest 1/3 of the entries.
+                for (Iterator<Entry<String, QueryEntry>> it =
+                        map.entrySet().iterator(); it.hasNext();) {
+                    Entry<String, QueryEntry> mapEntry = it.next();
+                    if (oldestSet.contains(mapEntry.getValue())) {
+                        it.remove();
+                    }
                 }
             }
+        } finally {
+            lock.unlock();
         }
     }
 

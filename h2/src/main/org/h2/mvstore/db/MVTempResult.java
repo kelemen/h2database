@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.lang.ref.Reference;
 import java.util.Collection;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
 import org.h2.expression.Expression;
@@ -142,6 +144,8 @@ public abstract class MVTempResult implements ResultExternal {
      */
     private final Reference<?> fileRef;
 
+    private final Lock lock = new ReentrantLock();
+
     /**
      * Creates a shallow copy of the result.
      *
@@ -202,23 +206,33 @@ public abstract class MVTempResult implements ResultExternal {
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
-        if (parent != null) {
-            parent.closeChild();
-        } else {
-            if (childCount == 0) {
-                delete();
+    public void close() {
+        lock.lock();
+        try {
+            if (closed) {
+                return;
             }
+            closed = true;
+            if (parent != null) {
+                parent.closeChild();
+            } else {
+                if (childCount == 0) {
+                    delete();
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
-    private synchronized void closeChild() {
-        if (--childCount == 0 && closed) {
-            delete();
+    private void closeChild() {
+        lock.lock();
+        try {
+            if (--childCount == 0 && closed) {
+                delete();
+            }
+        } finally {
+            lock.unlock();
         }
     }
 

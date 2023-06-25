@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.SysProperties;
 import org.h2.mvstore.db.MVTable;
 
@@ -25,6 +27,7 @@ import org.h2.mvstore.db.MVTable;
  * CTRL-BREAK handler, but includes information about table locks.
  */
 public class ThreadDeadlockDetector {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private static final String INDENT = "    ";
 
@@ -50,9 +53,14 @@ public class ThreadDeadlockDetector {
     /**
      * Initialize the detector.
      */
-    public static synchronized void init() {
-        if (detector == null) {
-            detector = new ThreadDeadlockDetector();
+    public static void init() {
+        CLASS_LOCK.lock();
+        try {
+            if (detector == null) {
+                detector = new ThreadDeadlockDetector();
+            }
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 

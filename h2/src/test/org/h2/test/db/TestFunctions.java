@@ -50,6 +50,8 @@ import java.util.Properties;
 import java.util.TimeZone;
 import java.util.UUID;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.Aggregate;
 import org.h2.api.AggregateFunction;
 import org.h2.api.ErrorCode;
@@ -79,7 +81,8 @@ public class TestFunctions extends TestDb implements AggregateFunction {
 
     static int count;
 
-    private static HashSet<SimpleResultSet> RESULT_SETS = new HashSet<>();
+    private static final HashSet<SimpleResultSet> RESULT_SETS = new HashSet<>();
+    private static final Lock RESULT_SETS_LOCK = new ReentrantLock();
 
     /**
      * Run just this test.
@@ -160,7 +163,8 @@ public class TestFunctions extends TestDb implements AggregateFunction {
     private void testFunctionTable() throws SQLException {
         Connection conn = getConnection("functions");
         Statement stat = conn.createStatement();
-        synchronized (RESULT_SETS) {
+        RESULT_SETS_LOCK.lock();
+        try {
             try {
                 stat.execute("create alias simple_function_table for '" +
                         TestFunctions.class.getName() + ".simpleFunctionTable'");
@@ -172,6 +176,8 @@ public class TestFunctions extends TestDb implements AggregateFunction {
             } finally {
                 RESULT_SETS.clear();
             }
+        } finally {
+            RESULT_SETS_LOCK.unlock();
         }
         stat.execute("create alias function_table_with_parameter for '" +
                 TestFunctions.class.getName() + ".functionTableWithParameter'");

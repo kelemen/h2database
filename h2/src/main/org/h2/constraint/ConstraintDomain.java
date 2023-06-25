@@ -7,6 +7,8 @@ package org.h2.constraint;
 
 import java.util.HashSet;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.Parser;
 import org.h2.command.ddl.AlterDomain;
@@ -38,8 +40,11 @@ public class ConstraintDomain extends Constraint {
 
     private DomainColumnResolver resolver;
 
+    private final Lock lock;
+
     public ConstraintDomain(Schema schema, int id, String name, Domain domain) {
         super(schema, id, name, null);
+        this.lock = new ReentrantLock();
         this.domain = domain;
         resolver = new DomainColumnResolver(domain.getDataType());
     }
@@ -68,9 +73,12 @@ public class ConstraintDomain extends Constraint {
         expr.mapColumns(resolver, 0, Expression.MAP_INITIAL);
         expr = expr.optimize(session);
         // check if the column is mapped
-        synchronized (this) {
+        lock.lock();
+        try {
             resolver.setValue(ValueNull.INSTANCE);
             expr.getValue(session);
+        } finally {
+            lock.unlock();
         }
         this.expr = expr;
     }
@@ -118,9 +126,12 @@ public class ConstraintDomain extends Constraint {
      */
     public void check(SessionLocal session, Value value) {
         Value v;
-        synchronized (this) {
+        lock.lock();
+        try {
             resolver.setValue(value);
             v = expr.getValue(session);
+        } finally {
+            lock.unlock();
         }
         // Both TRUE and NULL are OK
         if (v.isFalse()) {
@@ -138,18 +149,24 @@ public class ConstraintDomain extends Constraint {
     public Expression getCheckConstraint(SessionLocal session, String columnName) {
         String sql;
         if (columnName != null) {
-            synchronized (this) {
+            lock.lock();
+            try {
                 try {
                     resolver.setColumnName(columnName);
                     sql = expr.getSQL(DEFAULT_SQL_FLAGS);
                 } finally {
                     resolver.resetColumnName();
                 }
+            } finally {
+                lock.unlock();
             }
             return new Parser(session).parseExpression(sql);
         } else {
-            synchronized (this) {
+            lock.lock();
+            try {
                 sql = expr.getSQL(DEFAULT_SQL_FLAGS);
+            } finally {
+                lock.unlock();
             }
             return new Parser(session).parseDomainConstraintExpression(sql);
         }

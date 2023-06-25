@@ -7,6 +7,8 @@ package org.h2.command.dml;
 
 import java.text.Collator;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.command.Parser;
@@ -92,9 +94,13 @@ public class Set extends Prepared {
             if (value < 0 || value > 2) {
                 throw DbException.getInvalidValueException("ALLOW_LITERALS", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setAllowLiterals(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -104,9 +110,13 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("CACHE_SIZE", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setCacheSize(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -127,11 +137,19 @@ public class Set extends Prepared {
                 // use the system session so that the current transaction
                 // (if any) is not committed
                 SessionLocal sysSession = database.getSystemSession();
-                synchronized (sysSession) {
-                    synchronized (database) {
+                Lock sessionLock = sysSession.sessionLock();
+                sessionLock.lock();
+                try {
+                    Lock dbLock = database.dbLock();
+                    dbLock.lock();
+                    try {
                         addOrUpdateSetting(sysSession, name, value, 0);
                         sysSession.commit(true);
+                    } finally {
+                        dbLock.unlock();
                     }
+                } finally {
+                    sessionLock.unlock();
                 }
             }
             break;
@@ -156,7 +174,9 @@ public class Set extends Prepared {
                 }
                 compareMode = CompareMode.getInstance(stringValue, strength);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 CompareMode old = database.getCompareMode();
                 if (old.equals(compareMode)) {
                     break;
@@ -167,6 +187,8 @@ public class Set extends Prepared {
                 }
                 addOrUpdateSetting(name, buff.toString(), 0);
                 database.setCompareMode(compareMode);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -176,8 +198,12 @@ public class Set extends Prepared {
                 // just ignore the command if not starting
                 // this avoids problems when running recovery scripts
                 int value = getIntValue();
-                synchronized (database) {
+                Lock dbLock = database.dbLock();
+                dbLock.lock();
+                try {
                     addOrUpdateSetting(name, null, value);
+                } finally {
+                    dbLock.unlock();
                 }
             }
             break;
@@ -197,9 +223,13 @@ public class Set extends Prepared {
             } else if (value < 0) {
                 throw DbException.getInvalidValueException("DB_CLOSE_DELAY", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setCloseDelay(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -209,17 +239,25 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("DEFAULT_LOCK_TIMEOUT", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
         case SetTypes.DEFAULT_TABLE_TYPE: {
             session.getUser().checkAdmin();
             int value = getIntValue();
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setDefaultTableType(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -249,7 +287,9 @@ public class Set extends Prepared {
         }
         case SetTypes.JAVA_OBJECT_SERIALIZER: {
             session.getUser().checkAdmin();
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 Table table = database.getFirstUserTable();
                 if (table != null) {
                     throw DbException.get(ErrorCode.JAVA_OBJECT_SERIALIZER_CHANGE_WITH_DATA_TABLE,
@@ -257,24 +297,34 @@ public class Set extends Prepared {
                 }
                 database.setJavaObjectSerializerName(stringValue);
                 addOrUpdateSetting(name, stringValue, 0);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
         case SetTypes.IGNORECASE: {
             session.getUser().checkAdmin();
             int value = getIntValue();
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setIgnoreCase(value == 1);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
         case SetTypes.LOCK_MODE: {
             session.getUser().checkAdmin();
             int value = getIntValue();
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setLockMode(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -292,9 +342,13 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("MAX_LENGTH_INPLACE_LOB", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setMaxLengthInplaceLob(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -312,9 +366,13 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("MAX_MEMORY_ROWS", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setMaxMemoryRows(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -324,8 +382,12 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("MAX_MEMORY_UNDO", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -436,9 +498,13 @@ public class Set extends Prepared {
                 throw DbException.getInvalidValueException("TRACE_MAX_FILE_SIZE", value);
             }
             int size = value * (1024 * 1024);
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.getTraceSystem().setMaxFileSize(size);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -461,9 +527,13 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("WRITE_DELAY", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setWriteDelay(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -473,9 +543,13 @@ public class Set extends Prepared {
             if (value < 0) {
                 throw DbException.getInvalidValueException("RETENTION_TIME", value);
             }
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setRetentionTime(value);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -502,13 +576,17 @@ public class Set extends Prepared {
             session.getUser().checkAdmin();
             boolean value = expression.optimize(session).getBooleanValue(session);
             try {
-                synchronized (database) {
+                Lock dbLock = database.dbLock();
+                dbLock.lock();
+                try {
                     if (value) {
                         database.setAuthenticator(AuthenticatorFactory.createAuthenticator());
                     } else {
                         database.setAuthenticator(null);
                     }
                     addOrUpdateSetting(name, value ? "TRUE" : "FALSE", 0);
+                } finally {
+                    dbLock.unlock();
                 }
             } catch (Exception e) {
                 // Errors during start are ignored to allow to open the database
@@ -524,9 +602,13 @@ public class Set extends Prepared {
         case SetTypes.IGNORE_CATALOGS: {
             session.getUser().checkAdmin();
             int value = getIntValue();
-            synchronized (database) {
+            Lock dbLock = database.dbLock();
+            dbLock.lock();
+            try {
                 database.setIgnoreCatalogs(value == 1);
                 addOrUpdateSetting(name, null, value);
+            } finally {
+                dbLock.unlock();
             }
             break;
         }
@@ -601,7 +683,7 @@ public class Set extends Prepared {
 
     private void addOrUpdateSetting(SessionLocal session, String name, String s, int v) {
         Database database = session.getDatabase();
-        assert Thread.holdsLock(database);
+        assert database.dbLock().isHeldByCurrentThread();
         if (database.isReadOnly()) {
             return;
         }

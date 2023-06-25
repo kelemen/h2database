@@ -12,16 +12,20 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * This is a utility class with mathematical helper functions.
  */
 public class MathUtils {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     /**
      * The secure random object.
      */
     static SecureRandom secureRandom;
+    static Lock secureRandomLock = new ReentrantLock();
 
     /**
      * True if the secure random object is seeded.
@@ -61,65 +65,78 @@ public class MathUtils {
         return (x + blockSizePowerOf2 - 1) & -blockSizePowerOf2;
     }
 
-    private static synchronized SecureRandom getSecureRandom() {
-        if (secureRandom != null) {
-            return secureRandom;
-        }
-        // Workaround for SecureRandom problem as described in
-        // https://bugs.openjdk.java.net/browse/JDK-6202721
-        // Can not do that in a static initializer block, because
-        // threads are not started until after the initializer block exits
+    private static SecureRandom getSecureRandom() {
+        CLASS_LOCK.lock();
         try {
-            secureRandom = SecureRandom.getInstance("SHA1PRNG");
-            // On some systems, secureRandom.generateSeed() is very slow.
-            // In this case it is initialized using our own seed implementation
-            // and afterwards (in the thread) using the regular algorithm.
-            Runnable runnable = () -> {
-                try {
-                    SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
-                    byte[] seed = sr.generateSeed(20);
-                    synchronized (secureRandom) {
-                        secureRandom.setSeed(seed);
-                        seeded = true;
-                    }
-                } catch (Exception e) {
-                    // NoSuchAlgorithmException
-                    warn("SecureRandom", e);
-                }
-            };
-
-            try {
-                Thread t = new Thread(runnable, "Generate Seed");
-                // let the process terminate even if generating the seed is
-                // really slow
-                t.setDaemon(true);
-                t.start();
-                Thread.yield();
-                try {
-                    // normally, generateSeed takes less than 200 ms
-                    t.join(400);
-                } catch (InterruptedException e) {
-                    warn("InterruptedException", e);
-                }
-                if (!seeded) {
-                    byte[] seed = generateAlternativeSeed();
-                    // this never reduces randomness
-                    synchronized (secureRandom) {
-                        secureRandom.setSeed(seed);
-                    }
-                }
-            } catch (SecurityException e) {
-                // workaround for the Google App Engine: don't use a thread
-                runnable.run();
-                generateAlternativeSeed();
+            if (secureRandom != null) {
+                return secureRandom;
             }
+            // Workaround for SecureRandom problem as described in
+            // https://bugs.openjdk.java.net/browse/JDK-6202721
+            // Can not do that in a static initializer block, because
+            // threads are not started until after the initializer block exits
+            try {
+                secureRandom = SecureRandom.getInstance("SHA1PRNG");
+                secureRandomLock = new ReentrantLock();
+                // On some systems, secureRandom.generateSeed() is very slow.
+                // In this case it is initialized using our own seed implementation
+                // and afterwards (in the thread) using the regular algorithm.
+                Runnable runnable = () -> {
+                    try {
+                        SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
+                        byte[] seed = sr.generateSeed(20);
+                        secureRandomLock.lock();
+                        try {
+                            secureRandom.setSeed(seed);
+                            seeded = true;
+                        } finally {
+                            secureRandomLock.unlock();
+                        }
+                    } catch (Exception e) {
+                        // NoSuchAlgorithmException
+                        warn("SecureRandom", e);
+                    }
+                };
 
-        } catch (Exception e) {
-            // NoSuchAlgorithmException
-            warn("SecureRandom", e);
-            secureRandom = new SecureRandom();
+                try {
+                    Thread t = new Thread(runnable, "Generate Seed");
+                    // let the process terminate even if generating the seed is
+                    // really slow
+                    t.setDaemon(true);
+                    t.start();
+                    Thread.yield();
+                    try {
+                        // normally, generateSeed takes less than 200 ms
+                        t.join(400);
+                    } catch (InterruptedException e) {
+                        warn("InterruptedException", e);
+                    }
+                    if (!seeded) {
+                        byte[] seed = generateAlternativeSeed();
+                        // this never reduces randomness
+                        secureRandomLock.lock();
+                        try {
+                            secureRandom.setSeed(seed);
+                        } finally {
+                            secureRandomLock.unlock();
+                        }
+                    }
+                } catch (SecurityException e) {
+                    // workaround for the Google App Engine: don't use a thread
+                    runnable.run();
+                    generateAlternativeSeed();
+                }
+
+            } catch (Exception e) {
+                // NoSuchAlgorithmException
+                warn("SecureRandom", e);
+                secureRandom = new SecureRandom();
+                secureRandomLock = new ReentrantLock();
+            }
+            return secureRandom;
+        } finally {
+            CLASS_LOCK.unlock();
         }
-        return secureRandom;
     }
 
     /**

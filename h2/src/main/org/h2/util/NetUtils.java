@@ -14,6 +14,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.UnknownHostException;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
@@ -23,6 +25,7 @@ import org.h2.security.CipherFactory;
  * This utility class contains socket helper functions.
  */
 public class NetUtils {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private static final int CACHE_MILLIS = 1000;
     private static InetAddress cachedBindAddress;
@@ -189,10 +192,13 @@ public class NetUtils {
         if (host == null || host.isEmpty()) {
             return null;
         }
-        synchronized (NetUtils.class) {
+        CLASS_LOCK.lock();
+        try {
             if (cachedBindAddress == null) {
                 cachedBindAddress = InetAddress.getByName(host);
             }
+        } finally {
+            CLASS_LOCK.unlock();
         }
         return cachedBindAddress;
     }
@@ -262,49 +268,54 @@ public class NetUtils {
      *
      * @return the local host address
      */
-    public static synchronized String getLocalAddress() {
-        long now = System.nanoTime();
-        if (cachedLocalAddress != null && now - cachedLocalAddressTime < CACHE_MILLIS * 1_000_000L) {
-            return cachedLocalAddress;
-        }
-        InetAddress bind = null;
-        boolean useLocalhost = false;
+    public static String getLocalAddress() {
+        CLASS_LOCK.lock();
         try {
-            bind = getBindAddress();
-            if (bind == null) {
-                useLocalhost = true;
+            long now = System.nanoTime();
+            if (cachedLocalAddress != null && now - cachedLocalAddressTime < CACHE_MILLIS * 1_000_000L) {
+                return cachedLocalAddress;
             }
-        } catch (UnknownHostException e) {
-            // ignore
-        }
-        if (useLocalhost) {
+            InetAddress bind = null;
+            boolean useLocalhost = false;
             try {
-                bind = InetAddress.getLocalHost();
+                bind = getBindAddress();
+                if (bind == null) {
+                    useLocalhost = true;
+                }
             } catch (UnknownHostException e) {
-                throw DbException.convert(e);
+                // ignore
             }
-        }
-        String address;
-        if (bind == null) {
-            address = "localhost";
-        } else {
-            address = bind.getHostAddress();
-            if (bind instanceof Inet6Address) {
-                if (address.indexOf('%') >= 0) {
-                    address = "localhost";
-                } else if (address.indexOf(':') >= 0 && !address.startsWith("[")) {
-                    // adds'[' and ']' if required for
-                    // Inet6Address that contain a ':'.
-                    address = "[" + address + "]";
+            if (useLocalhost) {
+                try {
+                    bind = InetAddress.getLocalHost();
+                } catch (UnknownHostException e) {
+                    throw DbException.convert(e);
                 }
             }
+            String address;
+            if (bind == null) {
+                address = "localhost";
+            } else {
+                address = bind.getHostAddress();
+                if (bind instanceof Inet6Address) {
+                    if (address.indexOf('%') >= 0) {
+                        address = "localhost";
+                    } else if (address.indexOf(':') >= 0 && !address.startsWith("[")) {
+                        // adds'[' and ']' if required for
+                        // Inet6Address that contain a ':'.
+                        address = "[" + address + "]";
+                    }
+                }
+            }
+            if (address.equals("127.0.0.1")) {
+                address = "localhost";
+            }
+            cachedLocalAddress = address;
+            cachedLocalAddressTime = now;
+            return address;
+        } finally {
+            CLASS_LOCK.unlock();
         }
-        if (address.equals("127.0.0.1")) {
-            address = "localhost";
-        }
-        cachedLocalAddress = address;
-        cachedLocalAddressTime = now;
-        return address;
     }
 
     /**

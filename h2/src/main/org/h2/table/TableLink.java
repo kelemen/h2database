@@ -17,6 +17,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.Prepared;
 import org.h2.engine.SessionLocal;
@@ -68,6 +70,7 @@ public class TableLink extends Table {
     private final boolean targetsMySql;
     private int fetchSize = 0;
     private boolean autocommit =true;
+    private final Lock lock = new ReentrantLock();
 
     public TableLink(Schema schema, int id, String name, String driver,
             String url, String user, String password, String originalSchema,
@@ -100,7 +103,9 @@ public class TableLink extends Table {
             try {
                 conn = database.getLinkConnection(driver, url, user, password);
                 conn.setAutoCommit(autocommit);
-                synchronized (conn) {
+                Lock connLock = conn.lock();
+                connLock.lock();
+                try {
                     try {
                         readMetaData();
                         return;
@@ -110,6 +115,8 @@ public class TableLink extends Table {
                         conn = null;
                         throw DbException.convert(e);
                     }
+                } finally {
+                    connLock.unlock();
                 }
             } catch (DbException e) {
                 if (retry >= MAX_RETRY) {
@@ -469,19 +476,24 @@ public class TableLink extends Table {
     }
 
     @Override
-    public synchronized long getRowCount(SessionLocal session) {
-        //The foo alias is used to support the PostgreSQL syntax
-        String sql = "SELECT COUNT(*) FROM " + qualifiedTableName + " as foo";
+    public long getRowCount(SessionLocal session) {
+        lock.lock();
         try {
-            PreparedStatement prep = execute(sql, null, false, session);
-            ResultSet rs = prep.getResultSet();
-            rs.next();
-            long count = rs.getLong(1);
-            rs.close();
-            reusePreparedStatement(prep, sql);
-            return count;
-        } catch (Exception e) {
-            throw wrapException(sql, e);
+            //The foo alias is used to support the PostgreSQL syntax
+            String sql = "SELECT COUNT(*) FROM " + qualifiedTableName + " as foo";
+            try {
+                PreparedStatement prep = execute(sql, null, false, session);
+                ResultSet rs = prep.getResultSet();
+                rs.next();
+                long count = rs.getLong(1);
+                rs.close();
+                reusePreparedStatement(prep, sql);
+                return count;
+            } catch (Exception e) {
+                throw wrapException(sql, e);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -519,7 +531,10 @@ public class TableLink extends Table {
         }
         for (int retry = 0;; retry++) {
             try {
-                synchronized (conn) {
+                Lock connLock = conn.lock();
+                connLock.lock();
+                try {
+
                     PreparedStatement prep = preparedMap.remove(sql);
                     if (prep == null) {
                         prep = conn.getConnection().prepareStatement(sql);
@@ -557,6 +572,8 @@ public class TableLink extends Table {
                         return null;
                     }
                     return prep;
+                } finally {
+                    connLock.unlock();
                 }
             } catch (SQLException e) {
                 if (retry >= MAX_RETRY) {
@@ -660,8 +677,12 @@ public class TableLink extends Table {
      * @param sql the SQL statement
      */
     public void reusePreparedStatement(PreparedStatement prep, String sql) {
-        synchronized (conn) {
+        Lock connLock = conn.lock();
+        connLock.lock();
+        try {
             preparedMap.put(sql, prep);
+        } finally {
+            connLock.unlock();
         }
     }
 

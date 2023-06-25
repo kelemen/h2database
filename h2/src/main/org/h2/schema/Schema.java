@@ -11,6 +11,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.ddl.CreateSynonymData;
 import org.h2.command.ddl.CreateTableData;
@@ -57,6 +59,7 @@ public class Schema extends DbObject {
      * concurrently create objects.
      */
     private final HashSet<String> temporaryUniqueNames = new HashSet<>();
+    private final Lock temporaryUniqueNamesLock = new ReentrantLock();
 
     /**
      * Create a new schema object.
@@ -468,8 +471,11 @@ public class Schema extends DbObject {
      */
     public void reserveUniqueName(String name) {
         if (name != null) {
-            synchronized (temporaryUniqueNames) {
+            temporaryUniqueNamesLock.lock();
+            try {
                 temporaryUniqueNames.add(name);
+            } finally {
+                temporaryUniqueNamesLock.unlock();
             }
         }
     }
@@ -481,8 +487,11 @@ public class Schema extends DbObject {
      */
     public void freeUniqueName(String name) {
         if (name != null) {
-            synchronized (temporaryUniqueNames) {
+            temporaryUniqueNamesLock.lock();
+            try {
                 temporaryUniqueNames.remove(name);
+            } finally {
+                temporaryUniqueNamesLock.unlock();
             }
         }
     }
@@ -490,7 +499,8 @@ public class Schema extends DbObject {
     private String getUniqueName(DbObject obj, Map<String, ? extends SchemaObject> map, String prefix) {
         StringBuilder nameBuilder = new StringBuilder(prefix);
         String hash = Integer.toHexString(obj.getName().hashCode());
-        synchronized (temporaryUniqueNames) {
+        temporaryUniqueNamesLock.lock();
+        try {
             for (int i = 0, len = hash.length(); i < len; i++) {
                 char c = hash.charAt(i);
                 String name = nameBuilder.append(c >= 'a' ? (char) (c - 0x20) : c).toString();
@@ -506,6 +516,8 @@ public class Schema extends DbObject {
                 }
                 nameBuilder.setLength(nameLength);
             }
+        } finally {
+            temporaryUniqueNamesLock.unlock();
         }
     }
 
@@ -763,7 +775,9 @@ public class Schema extends DbObject {
      * @return the created {@link Table} object
      */
     public Table createTable(CreateTableData data) {
-        synchronized (database) {
+        Lock dbLock = database.dbLock();
+        dbLock.lock();
+        try {
             if (!data.temporary || data.globalTemporary) {
                 database.lockMeta(data.session);
             }
@@ -781,6 +795,8 @@ public class Schema extends DbObject {
                 data.tableEngineParams = this.tableEngineParams;
             }
             return database.getTableEngine(tableEngine).createTable(data);
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -791,10 +807,14 @@ public class Schema extends DbObject {
      * @return the created {@link TableSynonym} object
      */
     public TableSynonym createSynonym(CreateSynonymData data) {
-        synchronized (database) {
+        Lock dbLock = database.dbLock();
+        dbLock.lock();
+        try {
             database.lockMeta(data.session);
             data.schema = this;
             return new TableSynonym(data);
+        } finally {
+            dbLock.unlock();
         }
     }
 
@@ -816,10 +836,14 @@ public class Schema extends DbObject {
     public TableLink createTableLink(int id, String tableName, String driver,
             String url, String user, String password, String originalSchema,
             String originalTable, boolean emitUpdates, boolean force) {
-        synchronized (database) {
+        Lock dbLock = database.dbLock();
+        dbLock.lock();
+        try {
             return new TableLink(this, id, tableName,
                     driver, url, user, password,
                     originalSchema, originalTable, emitUpdates, force);
+        } finally {
+            dbLock.unlock();
         }
     }
 

@@ -5,6 +5,8 @@
  */
 package org.h2.test.unit;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.test.TestBase;
 import org.h2.util.JdbcUtils;
@@ -54,17 +56,25 @@ public class TestObjectDeserialization extends TestBase {
      */
     private class TestClassLoader extends ClassLoader {
 
+        private final Lock lock;
+
         public TestClassLoader() {
             super();
+            lock = new ReentrantLock();
         }
 
         @Override
-        protected synchronized Class<?> loadClass(String name, boolean resolve)
+        protected Class<?> loadClass(String name, boolean resolve)
                 throws ClassNotFoundException {
-            if (name.equals(CLAZZ)) {
-                usesThreadContextClassLoader = true;
+            lock.lock();
+            try {
+                if (name.equals(CLAZZ)) {
+                    usesThreadContextClassLoader = true;
+                }
+                return super.loadClass(name, resolve);
+            } finally {
+                lock.unlock();
             }
-            return super.loadClass(name, resolve);
         }
 
     }

@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Map.Entry;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.api.IntervalQualifier;
 import org.h2.engine.Constants;
@@ -146,6 +148,7 @@ public final class Transfer {
     private boolean ssl;
     private int version;
     private byte[] lobMacSalt;
+    private final Lock lock;
 
     /**
      * Create a new transfer object for the specified session.
@@ -154,6 +157,7 @@ public final class Transfer {
      * @param s the socket
      */
     public Transfer(Session session, Socket s) {
+        this.lock = new ReentrantLock();
         this.session = session;
         this.socket = s;
     }
@@ -163,14 +167,19 @@ public final class Transfer {
      * output stream.
      * @throws IOException on failure
      */
-    public synchronized void init() throws IOException {
-        if (socket != null) {
-            in = new DataInputStream(
-                    new BufferedInputStream(
-                            socket.getInputStream(), Transfer.BUFFER_SIZE));
-            out = new DataOutputStream(
-                    new BufferedOutputStream(
-                            socket.getOutputStream(), Transfer.BUFFER_SIZE));
+    public void init() throws IOException {
+        lock.lock();
+        try {
+            if (socket != null) {
+                in = new DataInputStream(
+                        new BufferedInputStream(
+                                socket.getInputStream(), Transfer.BUFFER_SIZE));
+                out = new DataOutputStream(
+                        new BufferedOutputStream(
+                                socket.getOutputStream(), Transfer.BUFFER_SIZE));
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -434,18 +443,23 @@ public final class Transfer {
     /**
      * Close the transfer object and the socket.
      */
-    public synchronized void close() {
-        if (socket != null) {
-            try {
-                if (out != null) {
-                    out.flush();
+    public void close() {
+        lock.lock();
+        try {
+            if (socket != null) {
+                try {
+                    if (out != null) {
+                        out.flush();
+                    }
+                    socket.close();
+                } catch (IOException e) {
+                    DbException.traceThrowable(e);
+                } finally {
+                    socket = null;
                 }
-                socket.close();
-            } catch (IOException e) {
-                DbException.traceThrowable(e);
-            } finally {
-                socket = null;
             }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -1285,8 +1299,13 @@ public final class Transfer {
         return version;
     }
 
-    public synchronized boolean isClosed() {
-        return socket == null || socket.isClosed();
+    public boolean isClosed() {
+        lock.lock();
+        try {
+            return socket == null || socket.isClosed();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

@@ -16,6 +16,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.api.Trigger;
 import org.h2.message.DbException;
@@ -30,6 +32,7 @@ import org.h2.value.ValueBigint;
  * Tests for trigger and constraints.
  */
 public class TestTriggersConstraints extends TestDb implements Trigger {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private static boolean mustNotCallTrigger;
     private String triggerName;
@@ -733,7 +736,8 @@ public class TestTriggersConstraints extends TestDb implements Trigger {
             };
             threads[i] = thread;
         }
-        synchronized (TestTriggersConstraints.class) {
+        CLASS_LOCK.lock();
+        try {
             AtomicIntegerArray array = ConcurrentTrigger.array;
             int l = array.length();
             for (int i = 0; i < l; i++) {
@@ -748,6 +752,8 @@ public class TestTriggersConstraints extends TestDb implements Trigger {
             for (int i = 0; i < l; i++) {
                 assertEquals(1, array.get(i));
             }
+        } finally {
+            CLASS_LOCK.unlock();
         }
         conn.close();
     }

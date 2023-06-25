@@ -36,6 +36,8 @@ import java.util.SimpleTimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.SessionLocal;
 import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
@@ -50,6 +52,7 @@ import org.h2.util.Utils;
  * The base class for all tests.
  */
 public abstract class TestBase {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     /**
      * The base directory.
@@ -363,7 +366,8 @@ public abstract class TestBase {
     private static void logThrowable(String s, Throwable e) {
         // synchronize on this class, because file locks are only visible to
         // other JVMs
-        synchronized (TestBase.class) {
+        CLASS_LOCK.lock();
+        try {
             try {
                 // lock
                 FileChannel fc = FilePath.get("error.lock").open("rw");
@@ -391,6 +395,8 @@ public abstract class TestBase {
             } catch (Throwable t) {
                 t.printStackTrace();
             }
+        } finally {
+            CLASS_LOCK.unlock();
         }
         System.err.flush();
     }
@@ -412,10 +418,15 @@ public abstract class TestBase {
      * @param millis the time in milliseconds
      * @param s the message
      */
-    static synchronized void printlnWithTime(long millis, String s) {
-        StringBuilder builder = new StringBuilder(s.length() + 19);
-        timeFormat.formatTo(LocalTime.now(), builder);
-        System.out.println(formatTime(builder.append(' '), millis).append(' ').append(s).toString());
+    static void printlnWithTime(long millis, String s) {
+        CLASS_LOCK.lock();
+        try {
+            StringBuilder builder = new StringBuilder(s.length() + 19);
+            timeFormat.formatTo(LocalTime.now(), builder);
+            System.out.println(formatTime(builder.append(' '), millis).append(' ').append(s).toString());
+        } finally {
+            CLASS_LOCK.unlock();
+        }
     }
 
     /**

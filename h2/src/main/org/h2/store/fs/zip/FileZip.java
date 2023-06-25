@@ -11,6 +11,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.NonWritableChannelException;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import org.h2.store.fs.FakeFileChannel;
@@ -33,8 +35,10 @@ class FileZip extends FileBase {
     private long inPos;
     private final long length;
     private boolean skipUsingRead;
+    private final Lock lock;
 
     FileZip(ZipFile file, ZipEntry entry) {
+        this.lock = new ReentrantLock();
         this.file = file;
         this.entry = entry;
         length = entry.getSize();
@@ -117,20 +121,25 @@ class FileZip extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
         if (shared) {
-            return new FileLock(FakeFileChannel.INSTANCE, position, size, shared) {
+            lock.lock();
+            try {
+                return new FileLock(FakeFileChannel.INSTANCE, position, size, shared) {
 
-                @Override
-                public boolean isValid() {
-                    return true;
-                }
+                    @Override
+                    public boolean isValid() {
+                        return true;
+                    }
 
-                @Override
-                public void release() throws IOException {
-                    // ignore
-                }};
+                    @Override
+                    public void release() throws IOException {
+                        // ignore
+                    }};
+            } finally {
+                lock.unlock();
+            }
         }
         return null;
     }

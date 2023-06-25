@@ -8,6 +8,8 @@ package org.h2.result;
 import java.io.IOException;
 import java.util.ArrayList;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.SessionRemote;
 import org.h2.engine.SysProperties;
@@ -53,7 +55,9 @@ public final class ResultRemote extends FetchedResult {
         } else {
             result = new ArrayList<>();
         }
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             try {
                 if (fetchRows(fetchSize)) {
                     rowCount = result.size();
@@ -61,6 +65,8 @@ public final class ResultRemote extends FetchedResult {
             } catch (IOException e) {
                 throw DbException.convertIOException(e, null);
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 
@@ -116,7 +122,9 @@ public final class ResultRemote extends FetchedResult {
         if (session == null) {
             return;
         }
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             session.checkClosed();
             try {
                 session.traceOperation("RESULT_RESET", id);
@@ -124,6 +132,8 @@ public final class ResultRemote extends FetchedResult {
             } catch (IOException e) {
                 throw DbException.convertIOException(e, null);
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 
@@ -167,9 +177,13 @@ public final class ResultRemote extends FetchedResult {
         }
         // TODO result sets: no reset possible for larger remote result sets
         try {
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 session.traceOperation("RESULT_CLOSE", id);
                 transfer.writeInt(SessionRemote.RESULT_CLOSE).writeInt(id);
+            } finally {
+                sessionLock.unlock();
             }
         } catch (IOException e) {
             trace.error(e, "close");
@@ -203,7 +217,9 @@ public final class ResultRemote extends FetchedResult {
     }
 
     private void fetchAdditionalRows() {
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             session.checkClosed();
             try {
                 rowOffset += result.size();
@@ -221,6 +237,8 @@ public final class ResultRemote extends FetchedResult {
             } catch (IOException e) {
                 throw DbException.convertIOException(e, null);
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 

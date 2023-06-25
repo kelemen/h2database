@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.security.AES;
 
@@ -26,8 +27,7 @@ public class CalculateHashConstantLong implements Runnable {
     private static BitSet primeNumbers = new BitSet();
     private static long[] randomValues;
     private static AtomicInteger high = new AtomicInteger(0x20);
-    private static Set<Long> candidates =
-            Collections.synchronizedSet(new HashSet<Long>());
+    private static Set<Long> candidates = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     private long constant;
     private int[] fromTo = new int[64 * 64];

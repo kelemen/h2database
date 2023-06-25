@@ -26,6 +26,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.script.Compilable;
 import javax.script.CompiledScript;
 import javax.script.ScriptEngineManager;
@@ -50,10 +52,13 @@ import org.h2.message.DbException;
  */
 public class SourceCompiler {
 
+    private static final Lock CLASS_LOCK = new ReentrantLock();
+
     /**
      * The "com.sun.tools.javac.Main" (if available).
      */
     static final JavaCompiler JAVA_COMPILER;
+    static final Lock JAVA_COMPILER_LOCK = new ReentrantLock();
 
     private static final Class<?> JAVAC_SUN;
 
@@ -344,9 +349,12 @@ public class SourceCompiler {
             compilationUnits.add(new StringJavaFileObject(fullClassName, source));
             // cannot concurrently compile
             final boolean ok;
-            synchronized (JAVA_COMPILER) {
+            JAVA_COMPILER_LOCK.lock();
+            try {
                 ok = JAVA_COMPILER.getTask(writer, fileManager, null, null,
                         null, compilationUnits).call();
+            } finally {
+                JAVA_COMPILER_LOCK.unlock();
             }
             String output = writer.toString();
             handleSyntaxError(output, (ok? 0: 1));
@@ -396,29 +404,34 @@ public class SourceCompiler {
         }.execute();
     }
 
-    private static synchronized void javacSun(Path javaFile) {
-        PrintStream old = System.err;
-        ByteArrayOutputStream buff = new ByteArrayOutputStream();
+    private static void javacSun(Path javaFile) {
+        CLASS_LOCK.lock();
         try {
-            System.setErr(new PrintStream(buff, false, "UTF-8"));
-            Method compile;
-            compile = JAVAC_SUN.getMethod("compile", String[].class);
-            Object javac = JAVAC_SUN.getDeclaredConstructor().newInstance();
-            // Bugfix: Here we should check exit status value instead of parsing javac output text.
-            // Because of the output text is different in different locale environment.
-            // @since 2018-07-20 little-pan
-            final Integer status = (Integer)compile.invoke(javac, (Object) new String[] {
-                    "-sourcepath", COMPILE_DIR,
-                    // "-Xlint:unchecked",
-                    "-d", COMPILE_DIR,
-                    "-encoding", "UTF-8",
-                    javaFile.toAbsolutePath().toString() });
-            String output = Utils10.byteArrayOutputStreamToString(buff, StandardCharsets.UTF_8);
-            handleSyntaxError(output, status);
-        } catch (Exception e) {
-            throw DbException.convert(e);
+            PrintStream old = System.err;
+            ByteArrayOutputStream buff = new ByteArrayOutputStream();
+            try {
+                System.setErr(new PrintStream(buff, false, "UTF-8"));
+                Method compile;
+                compile = JAVAC_SUN.getMethod("compile", String[].class);
+                Object javac = JAVAC_SUN.getDeclaredConstructor().newInstance();
+                // Bugfix: Here we should check exit status value instead of parsing javac output text.
+                // Because of the output text is different in different locale environment.
+                // @since 2018-07-20 little-pan
+                final Integer status = (Integer)compile.invoke(javac, (Object) new String[] {
+                        "-sourcepath", COMPILE_DIR,
+                        // "-Xlint:unchecked",
+                        "-d", COMPILE_DIR,
+                        "-encoding", "UTF-8",
+                        javaFile.toAbsolutePath().toString() });
+                String output = Utils10.byteArrayOutputStreamToString(buff, StandardCharsets.UTF_8);
+                handleSyntaxError(output, status);
+            } catch (Exception e) {
+                throw DbException.convert(e);
+            } finally {
+                System.setErr(old);
+            }
         } finally {
-            System.setErr(old);
+            CLASS_LOCK.unlock();
         }
     }
 

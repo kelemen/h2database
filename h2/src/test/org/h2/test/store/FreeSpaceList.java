@@ -8,6 +8,8 @@ package org.h2.test.store;
 import java.util.ArrayList;
 import java.util.List;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.mvstore.DataUtils;
 import org.h2.util.MathUtils;
 
@@ -27,8 +29,10 @@ public class FreeSpaceList {
     private final int blockSize;
 
     private List<BlockRange> freeSpaceList = new ArrayList<>();
+    private final Lock lock;
 
     public FreeSpaceList(int firstFreeBlock, int blockSize) {
+        this.lock = new ReentrantLock();
         this.firstFreeBlock = firstFreeBlock;
         if (Integer.bitCount(blockSize) != 1) {
             throw DataUtils.newIllegalArgumentException("Block size is not a power of 2");
@@ -40,10 +44,15 @@ public class FreeSpaceList {
     /**
      * Reset the list.
      */
-    public synchronized void clear() {
-        freeSpaceList.clear();
-        freeSpaceList.add(new BlockRange(firstFreeBlock,
-                Integer.MAX_VALUE - firstFreeBlock));
+    public void clear() {
+        lock.lock();
+        try {
+            freeSpaceList.clear();
+            freeSpaceList.add(new BlockRange(firstFreeBlock,
+                    Integer.MAX_VALUE - firstFreeBlock));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -52,18 +61,24 @@ public class FreeSpaceList {
      * @param length the number of bytes to allocate
      * @return the start position in bytes
      */
-    public synchronized long allocate(int length) {
-        int required = getBlockCount(length);
-        for (BlockRange pr : freeSpaceList) {
-            if (pr.length >= required) {
-                int result = pr.start;
-                this.markUsed(pr.start * blockSize, length);
-                return result * blockSize;
+    public long allocate(int length) {
+        lock.lock();
+        try {
+
+            int required = getBlockCount(length);
+            for (BlockRange pr : freeSpaceList) {
+                if (pr.length >= required) {
+                    int result = pr.start;
+                    this.markUsed(pr.start * blockSize, length);
+                    return result * blockSize;
+                }
             }
+            throw DataUtils.newMVStoreException(
+                    DataUtils.ERROR_INTERNAL,
+                    "Could not find a free page to allocate");
+        } finally {
+            lock.unlock();
         }
-        throw DataUtils.newMVStoreException(
-                DataUtils.ERROR_INTERNAL,
-                "Could not find a free page to allocate");
     }
 
     /**
@@ -72,48 +87,53 @@ public class FreeSpaceList {
      * @param pos the position in bytes
      * @param length the number of bytes
      */
-    public synchronized void markUsed(long pos, int length) {
-        int start = (int) (pos / blockSize);
-        int required = getBlockCount(length);
-        BlockRange found = null;
-        int i = 0;
-        for (BlockRange pr : freeSpaceList) {
-            if (start >= pr.start && start < (pr.start + pr.length)) {
-                found = pr;
-                break;
+    public void markUsed(long pos, int length) {
+        lock.lock();
+        try {
+            int start = (int) (pos / blockSize);
+            int required = getBlockCount(length);
+            BlockRange found = null;
+            int i = 0;
+            for (BlockRange pr : freeSpaceList) {
+                if (start >= pr.start && start < (pr.start + pr.length)) {
+                    found = pr;
+                    break;
+                }
+                i++;
             }
-            i++;
-        }
-        if (found == null) {
-            throw DataUtils.newMVStoreException(
-                    DataUtils.ERROR_INTERNAL,
-                    "Cannot find spot to mark as used in free list");
-        }
-        if (start + required > found.start + found.length) {
-            throw DataUtils.newMVStoreException(
-                    DataUtils.ERROR_INTERNAL,
-                    "Runs over edge of free space");
-        }
-        if (found.start == start) {
-            // if the used space is at the beginning of a free-space-range
-            found.start += required;
-            found.length -= required;
-            if (found.length == 0) {
-                // if the free-space-range is now empty, remove it
-                freeSpaceList.remove(i);
+            if (found == null) {
+                throw DataUtils.newMVStoreException(
+                        DataUtils.ERROR_INTERNAL,
+                        "Cannot find spot to mark as used in free list");
             }
-        } else if (found.start + found.length == start + required) {
-            // if the used space is at the end of a free-space-range
-            found.length -= required;
-        } else {
-            // it's in the middle, so split the existing entry
-            int length1 = start - found.start;
-            int start2 = start + required;
-            int length2 = found.start + found.length - start - required;
+            if (start + required > found.start + found.length) {
+                throw DataUtils.newMVStoreException(
+                        DataUtils.ERROR_INTERNAL,
+                        "Runs over edge of free space");
+            }
+            if (found.start == start) {
+                // if the used space is at the beginning of a free-space-range
+                found.start += required;
+                found.length -= required;
+                if (found.length == 0) {
+                    // if the free-space-range is now empty, remove it
+                    freeSpaceList.remove(i);
+                }
+            } else if (found.start + found.length == start + required) {
+                // if the used space is at the end of a free-space-range
+                found.length -= required;
+            } else {
+                // it's in the middle, so split the existing entry
+                int length1 = start - found.start;
+                int start2 = start + required;
+                int length2 = found.start + found.length - start - required;
 
-            found.length = length1;
-            BlockRange newRange = new BlockRange(start2, length2);
-            freeSpaceList.add(i + 1, newRange);
+                found.length = length1;
+                BlockRange newRange = new BlockRange(start2, length2);
+                freeSpaceList.add(i + 1, newRange);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -123,51 +143,56 @@ public class FreeSpaceList {
      * @param pos the position in bytes
      * @param length the number of bytes
      */
-    public synchronized void free(long pos, int length) {
-        int start = (int) (pos / blockSize);
-        int required = getBlockCount(length);
-        BlockRange found = null;
-        int i = 0;
-        for (BlockRange pr : freeSpaceList) {
-            if (pr.start > start) {
-                found = pr;
-                break;
-            }
-            i++;
-        }
-        if (found == null) {
-            throw DataUtils.newMVStoreException(
-                    DataUtils.ERROR_INTERNAL,
-                    "Cannot find spot to mark as unused in free list");
-        }
-        if (start + required == found.start) {
-            // if the used space is adjacent to the beginning of a
-            // free-space-range
-            found.start = start;
-            found.length += required;
-            // compact: merge the previous entry into this one if
-            // they are now adjacent
-            if (i > 0) {
-                BlockRange previous = freeSpaceList.get(i - 1);
-                if (previous.start + previous.length == found.start) {
-                    previous.length += found.length;
-                    freeSpaceList.remove(i);
+    public void free(long pos, int length) {
+        lock.lock();
+        try {
+            int start = (int) (pos / blockSize);
+            int required = getBlockCount(length);
+            BlockRange found = null;
+            int i = 0;
+            for (BlockRange pr : freeSpaceList) {
+                if (pr.start > start) {
+                    found = pr;
+                    break;
                 }
+                i++;
             }
-            return;
-        }
-        if (i > 0) {
-            // if the used space is adjacent to the end of a free-space-range
-            BlockRange previous = freeSpaceList.get(i - 1);
-            if (previous.start + previous.length == start) {
-                previous.length += required;
+            if (found == null) {
+                throw DataUtils.newMVStoreException(
+                        DataUtils.ERROR_INTERNAL,
+                        "Cannot find spot to mark as unused in free list");
+            }
+            if (start + required == found.start) {
+                // if the used space is adjacent to the beginning of a
+                // free-space-range
+                found.start = start;
+                found.length += required;
+                // compact: merge the previous entry into this one if
+                // they are now adjacent
+                if (i > 0) {
+                    BlockRange previous = freeSpaceList.get(i - 1);
+                    if (previous.start + previous.length == found.start) {
+                        previous.length += found.length;
+                        freeSpaceList.remove(i);
+                    }
+                }
                 return;
             }
-        }
+            if (i > 0) {
+                // if the used space is adjacent to the end of a free-space-range
+                BlockRange previous = freeSpaceList.get(i - 1);
+                if (previous.start + previous.length == start) {
+                    previous.length += required;
+                    return;
+                }
+            }
 
-        // it is between 2 entries, so add a new one
-        BlockRange newRange = new BlockRange(start, required);
-        freeSpaceList.add(i, newRange);
+            // it is between 2 entries, so add a new one
+            BlockRange newRange = new BlockRange(start, required);
+            freeSpaceList.add(i, newRange);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private int getBlockCount(int length) {

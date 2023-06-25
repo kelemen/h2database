@@ -14,6 +14,8 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.ArrayList;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.h2.engine.Constants;
@@ -340,12 +342,14 @@ class FileZip2 extends FileBase {
     private InputStream in;
     private long inPos;
     private boolean skipUsingRead;
+    private final Lock lock;
 
     FileZip2(String fullName, String name, ZipInputStream in, long length) {
         this.fullName = fullName;
         this.name = name;
         this.length = length;
         this.in = in;
+        this.lock = new ReentrantLock();
     }
 
     @Override
@@ -430,20 +434,25 @@ class FileZip2 extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
         if (shared) {
-            return new FileLock(FakeFileChannel.INSTANCE, position, size, shared) {
+            lock.lock();
+            try {
+                return new FileLock(FakeFileChannel.INSTANCE, position, size, shared) {
 
-                @Override
-                public boolean isValid() {
-                    return true;
-                }
+                    @Override
+                    public boolean isValid() {
+                        return true;
+                    }
 
-                @Override
-                public void release() throws IOException {
-                    // ignore
-                }};
+                    @Override
+                    public void release() throws IOException {
+                        // ignore
+                    }};
+            } finally {
+                lock.unlock();
+            }
         }
         return null;
     }

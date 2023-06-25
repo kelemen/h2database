@@ -11,12 +11,15 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Random;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The operation part of {@link TestMulti}.
  * Queries and updates two tables.
  */
 public class TestMultiOrder extends TestMultiThread {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
     private static int customerCount;
     private static int orderCount;
@@ -109,16 +112,31 @@ public class TestMultiOrder extends TestMultiThread {
         return buff.toString();
     }
 
-    private static synchronized int getNextCustomerId() {
-        return customerCount++;
+    private static int getNextCustomerId() {
+        CLASS_LOCK.lock();
+        try {
+            return customerCount++;
+        } finally {
+            CLASS_LOCK.unlock();
+        }
     }
 
-    private static synchronized int increaseOrders() {
-        return orderCount++;
+    private static int increaseOrders() {
+        CLASS_LOCK.lock();
+        try {
+            return orderCount++;
+        } finally {
+            CLASS_LOCK.unlock();
+        }
     }
 
-    private static synchronized int increaseOrderLines(int count) {
-        return orderLineCount += count;
+    private static int increaseOrderLines(int count) {
+        CLASS_LOCK.lock();
+        try {
+            return orderLineCount += count;
+        } finally {
+            CLASS_LOCK.unlock();
+        }
     }
 
     private static int getCustomerCount() {

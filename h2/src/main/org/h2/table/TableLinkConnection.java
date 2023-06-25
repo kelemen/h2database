@@ -9,6 +9,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Objects;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.message.DbException;
 import org.h2.util.JdbcUtils;
 
@@ -22,6 +24,7 @@ public class TableLinkConnection {
      * The map where the link is kept.
      */
     private final HashMap<TableLinkConnection, TableLinkConnection> map;
+    private final Lock mapLock;
 
     /**
      * The connection information.
@@ -39,14 +42,22 @@ public class TableLinkConnection {
     private int useCounter;
     private boolean autocommit =true;
 
+    private final Lock lock = new ReentrantLock();
+
     private TableLinkConnection(
             HashMap<TableLinkConnection, TableLinkConnection> map,
+            Lock mapLock,
             String driver, String url, String user, String password) {
         this.map = map;
+        this.mapLock = mapLock;
         this.driver = driver;
         this.url = url;
         this.user = user;
         this.password = password;
+    }
+
+    public Lock lock() {
+        return lock;
     }
 
     /**
@@ -63,15 +74,17 @@ public class TableLinkConnection {
      */
     public static TableLinkConnection open(
             HashMap<TableLinkConnection, TableLinkConnection> map,
+            Lock mapLock,
             String driver, String url, String user, String password,
             boolean shareLinkedConnections) {
-        TableLinkConnection t = new TableLinkConnection(map, driver, url,
+        TableLinkConnection t = new TableLinkConnection(map, mapLock, driver, url,
                 user, password);
         if (!shareLinkedConnections) {
             t.open();
             return t;
         }
-        synchronized (map) {
+        mapLock.lock();
+        try {
             TableLinkConnection result = map.get(t);
             if (result == null) {
                 t.open();
@@ -82,6 +95,8 @@ public class TableLinkConnection {
             }
             result.useCounter++;
             return result;
+        } finally {
+            mapLock.unlock();
         }
     }
 
@@ -132,11 +147,14 @@ public class TableLinkConnection {
      */
     void close(boolean force) {
         boolean actuallyClose = false;
-        synchronized (map) {
+        mapLock.lock();
+        try {
             if (--useCounter <= 0 || force) {
                 actuallyClose = true;
                 map.remove(this);
             }
+        } finally {
+            mapLock.unlock();
         }
         if (actuallyClose) {
             JdbcUtils.closeSilently(conn);

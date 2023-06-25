@@ -11,6 +11,8 @@ import java.io.PrintWriter;
 import java.io.Writer;
 import java.text.SimpleDateFormat;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.jdbc.JdbcException;
@@ -96,6 +98,7 @@ public class TraceSystem implements TraceWriter {
     private boolean writingErrorLogged;
     private TraceWriter writer = this;
     private PrintStream sysOut = System.out;
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Create a new trace system object.
@@ -220,11 +223,16 @@ public class TraceSystem implements TraceWriter {
         return levelFile;
     }
 
-    private synchronized String format(String module, String s) {
-        if (dateFormat == null) {
-            dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss ");
+    private String format(String module, String s) {
+        lock.lock();
+        try {
+            if (dateFormat == null) {
+                dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss ");
+            }
+            return dateFormat.format(System.currentTimeMillis()) + module + ": " + s;
+        } finally {
+            lock.unlock();
         }
-        return dateFormat.format(System.currentTimeMillis()) + module + ": " + s;
     }
 
     @Override
@@ -249,40 +257,45 @@ public class TraceSystem implements TraceWriter {
         }
     }
 
-    private synchronized void writeFile(String s, Throwable t) {
+    private void writeFile(String s, Throwable t) {
+        lock.lock();
         try {
-            checkSize = (checkSize + 1) % CHECK_SIZE_EACH_WRITES;
-            if (checkSize == 0) {
-                closeWriter();
-                if (maxFileSize > 0 && FileUtils.size(fileName) > maxFileSize) {
-                    String old = fileName + ".old";
-                    FileUtils.delete(old);
-                    FileUtils.move(fileName, old);
+            try {
+                checkSize = (checkSize + 1) % CHECK_SIZE_EACH_WRITES;
+                if (checkSize == 0) {
+                    closeWriter();
+                    if (maxFileSize > 0 && FileUtils.size(fileName) > maxFileSize) {
+                        String old = fileName + ".old";
+                        FileUtils.delete(old);
+                        FileUtils.move(fileName, old);
+                    }
                 }
-            }
-            if (!openWriter()) {
-                return;
-            }
-            printWriter.println(s);
-            if (t != null) {
-                if (levelFile == ERROR && t instanceof JdbcException) {
-                    JdbcException se = (JdbcException) t;
-                    int code = se.getErrorCode();
-                    if (ErrorCode.isCommon(code)) {
-                        printWriter.println(t);
+                if (!openWriter()) {
+                    return;
+                }
+                printWriter.println(s);
+                if (t != null) {
+                    if (levelFile == ERROR && t instanceof JdbcException) {
+                        JdbcException se = (JdbcException) t;
+                        int code = se.getErrorCode();
+                        if (ErrorCode.isCommon(code)) {
+                            printWriter.println(t);
+                        } else {
+                            t.printStackTrace(printWriter);
+                        }
                     } else {
                         t.printStackTrace(printWriter);
                     }
-                } else {
-                    t.printStackTrace(printWriter);
                 }
+                printWriter.flush();
+                if (closed) {
+                    closeWriter();
+                }
+            } catch (Exception e) {
+                logWritingError(e);
             }
-            printWriter.flush();
-            if (closed) {
-                closeWriter();
-            }
-        } catch (Exception e) {
-            logWritingError(e);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -319,19 +332,24 @@ public class TraceSystem implements TraceWriter {
         return true;
     }
 
-    private synchronized void closeWriter() {
-        if (printWriter != null) {
-            printWriter.flush();
-            printWriter.close();
-            printWriter = null;
-        }
-        if (fileWriter != null) {
-            try {
-                fileWriter.close();
-            } catch (IOException e) {
-                // ignore
+    private void closeWriter() {
+        lock.lock();
+        try {
+            if (printWriter != null) {
+                printWriter.flush();
+                printWriter.close();
+                printWriter = null;
             }
-            fileWriter = null;
+            if (fileWriter != null) {
+                try {
+                    fileWriter.close();
+                } catch (IOException e) {
+                    // ignore
+                }
+                fileWriter = null;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 

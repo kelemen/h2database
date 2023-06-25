@@ -12,30 +12,45 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The base class for file implementations.
  */
 public abstract class FileBase extends FileChannel {
+    private final Lock channelLock = new ReentrantLock();
 
-    @Override
-    public synchronized int read(ByteBuffer dst, long position)
-            throws IOException {
-        long oldPos = position();
-        position(position);
-        int len = read(dst);
-        position(oldPos);
-        return len;
+    protected Lock channelLock() {
+        return channelLock;
     }
 
     @Override
-    public synchronized int write(ByteBuffer src, long position)
-            throws IOException {
-        long oldPos = position();
-        position(position);
-        int len = write(src);
-        position(oldPos);
-        return len;
+    public int read(ByteBuffer dst, long position) throws IOException {
+        channelLock.lock();
+        try {
+            long oldPos = position();
+            position(position);
+            int len = read(dst);
+            position(oldPos);
+            return len;
+        } finally {
+            channelLock.unlock();
+        }
+    }
+
+    @Override
+    public int write(ByteBuffer src, long position) throws IOException {
+        channelLock.lock();
+        try {
+            long oldPos = position();
+            position(position);
+            int len = write(src);
+            position(oldPos);
+            return len;
+        } finally {
+            channelLock.unlock();
+        }
     }
 
     @Override

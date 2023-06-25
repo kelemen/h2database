@@ -14,6 +14,7 @@ import java.lang.ref.ReferenceQueue;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A phantom reference to watch for unclosed objects.
@@ -29,7 +30,7 @@ public class CloseWatcher extends PhantomReference<Object> {
      * The reference set. Must keep it, otherwise the references are garbage
      * collected first and thus never enqueued.
      */
-    private static final Set<CloseWatcher> refs = Collections.synchronizedSet(new HashSet<>());
+    private static final Set<CloseWatcher> refs = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /**
      * The stack trace of when the object was created. It is converted to a

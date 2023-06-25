@@ -10,8 +10,12 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.DatabaseEventListener;
 import org.h2.api.ErrorCode;
 import org.h2.command.ddl.CreateTableData;
@@ -48,6 +52,8 @@ import org.h2.value.TypeInfo;
  * A table stored in a MVStore.
  */
 public class MVTable extends TableBase {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
+
     /**
      * The table name this thread is waiting to lock.
      */
@@ -135,6 +141,9 @@ public class MVTable extends TableBase {
     private final Store store;
     private final TransactionStore transactionStore;
 
+    private final Lock lock = new ReentrantLock();
+    private final Condition lockCondition = lock.newCondition();
+
     public MVTable(CreateTableData data, Store store) {
         super(data);
         this.isHidden = data.isHidden;
@@ -176,7 +185,8 @@ public class MVTable extends TableBase {
         if (lockType != Table.EXCLUSIVE_LOCK && lockSharedSessions.containsKey(session)) {
             return true;
         }
-        synchronized (this) {
+        lock.lock();
+        try {
             if (lockType != Table.EXCLUSIVE_LOCK && lockSharedSessions.containsKey(session)) {
                 return true;
             }
@@ -194,6 +204,8 @@ public class MVTable extends TableBase {
                 }
                 waitingSessions.remove(session);
             }
+        } finally {
+            lock.unlock();
         }
         return false;
     }
@@ -236,7 +248,7 @@ public class MVTable extends TableBase {
                 if (sleep == 0) {
                     sleep = 1;
                 }
-                wait(sleep);
+                lockCondition.await(sleep, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 // ignore
             }
@@ -314,8 +326,11 @@ public class MVTable extends TableBase {
             }
             traceLock(s, lockType, TraceLockEvent.TRACE_LOCK_UNLOCK, NO_EXTRA_INFO);
             if (lockType != Table.READ_LOCK && !waitingSessions.isEmpty()) {
-                synchronized (this) {
-                    notifyAll();
+                lock.lock();
+                try {
+                    lockCondition.signalAll();
+                } finally {
+                    lock.unlock();
                 }
             }
         }
@@ -799,7 +814,8 @@ public class MVTable extends TableBase {
     @Override
     public ArrayList<SessionLocal> checkDeadlock(SessionLocal session, SessionLocal clash, Set<SessionLocal> visited) {
         // only one deadlock check at any given time
-        synchronized (getClass()) {
+        CLASS_LOCK.lock();
+        try {
             if (clash == null) {
                 // verification is started
                 clash = session;
@@ -842,6 +858,8 @@ public class MVTable extends TableBase {
                 }
             }
             return error;
+        } finally {
+            CLASS_LOCK.unlock();
         }
     }
 

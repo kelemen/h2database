@@ -5,6 +5,7 @@
  */
 package org.h2.store;
 
+import java.util.concurrent.locks.Lock;
 import org.h2.message.DbException;
 import org.h2.util.SmallLRUCache;
 import org.h2.util.TempFileDeleter;
@@ -67,7 +68,7 @@ public interface DataHandler {
      *
      * @return the synchronization object
      */
-    Object getLobSyncObject();
+    Lock getLobSyncObject();
 
     /**
      * Get the lob file list cache if it is used.

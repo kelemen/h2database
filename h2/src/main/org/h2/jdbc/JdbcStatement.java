@@ -11,6 +11,7 @@ import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.concurrent.locks.Lock;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.engine.Session;
@@ -85,7 +86,9 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
             if (isDebugEnabled()) {
                 debugCodeAssign("ResultSet", TraceObject.RESULT_SET, id, "executeQuery(" + quote(sql) + ')');
             }
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 checkClosed();
                 closeOldResultSet();
                 sql = JdbcConnection.translateSQL(sql, escapeProcessing);
@@ -107,6 +110,8 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
                     command.close();
                 }
                 resultSet = new JdbcResultSet(conn, this, command, result, id, scrollable, updatable, false);
+            } finally {
+                sessionLock.unlock();
             }
             return resultSet;
         } catch (Exception e) {
@@ -184,7 +189,9 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
         closeOldResultSet();
         sql = JdbcConnection.translateSQL(sql, escapeProcessing);
         CommandInterface command = conn.prepareCommand(sql, fetchSize);
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             setExecutingStatement(command);
             try {
                 ResultWithGeneratedKeys result = command.executeUpdate(generatedKeysRequest);
@@ -197,6 +204,8 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
             } finally {
                 setExecutingStatement(null);
             }
+        } finally {
+            sessionLock.unlock();
         }
         command.close();
         return updateCount;
@@ -237,7 +246,9 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
         CommandInterface command = conn.prepareCommand(sql, fetchSize);
         boolean lazy = false;
         boolean returnsResultSet;
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             setExecutingStatement(command);
             try {
                 if (command.isQuery()) {
@@ -261,6 +272,8 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
                     setExecutingStatement(null);
                 }
             }
+        } finally {
+            sessionLock.unlock();
         }
         if (!lazy) {
             command.close();
@@ -347,11 +360,15 @@ public class JdbcStatement extends TraceObject implements Statement, JdbcStateme
     }
 
     private void closeInternal() {
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             closeOldResultSet();
             if (conn != null) {
                 conn = null;
             }
+        } finally {
+            sessionLock.unlock();
         }
     }
 

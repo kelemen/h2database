@@ -91,7 +91,7 @@ public final class RangeInputStream extends FilterInputStream {
     }
 
     @Override
-    public synchronized void reset() throws IOException {
+    public void reset() throws IOException {
         throw new IOException("mark/reset not supported");
     }
 

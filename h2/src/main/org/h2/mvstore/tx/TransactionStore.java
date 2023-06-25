@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.IsolationLevel;
 import org.h2.mvstore.Cursor;
 import org.h2.mvstore.DataUtils;
@@ -129,6 +131,8 @@ public class TransactionStore {
         return transactionId > 0 ? UNDO_LOG_NAME_PREFIX + UNDO_LOG_OPEN + transactionId
                 : UNDO_LOG_NAME_PREFIX + UNDO_LOG_OPEN;
     }
+
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Create a new transaction store.
@@ -361,8 +365,13 @@ public class TransactionStore {
     /**
      * Close the transaction store.
      */
-    public synchronized void close() {
-        store.commit();
+    public void close() {
+        lock.lock();
+        try {
+            store.commit();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

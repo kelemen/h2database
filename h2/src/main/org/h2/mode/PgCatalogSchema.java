@@ -8,6 +8,8 @@ package org.h2.mode;
 import java.util.HashMap;
 import java.util.Map;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
 import org.h2.engine.SessionLocal;
@@ -20,6 +22,7 @@ import org.h2.table.Table;
  */
 public final class PgCatalogSchema extends MetaSchema {
 
+    private final Lock schemaLock;
     private volatile HashMap<String, Table> tables;
 
     /**
@@ -32,6 +35,7 @@ public final class PgCatalogSchema extends MetaSchema {
      */
     public PgCatalogSchema(Database database, User owner) {
         super(database, Constants.PG_CATALOG_SCHEMA_ID, database.sysIdentifier(Constants.SCHEMA_PG_CATALOG), owner);
+        schemaLock = new ReentrantLock();
     }
 
     @Override
@@ -43,17 +47,22 @@ public final class PgCatalogSchema extends MetaSchema {
         return map;
     }
 
-    private synchronized HashMap<String, Table> fillMap() {
-        HashMap<String, Table> map = tables;
-        if (map == null) {
-            map = database.newStringMap();
-            for (int type = 0; type < PgCatalogTable.META_TABLE_TYPE_COUNT; type++) {
-                PgCatalogTable table = new PgCatalogTable(this, Constants.PG_CATALOG_SCHEMA_ID - type, type);
-                map.put(table.getName(), table);
+    private HashMap<String, Table> fillMap() {
+        schemaLock.lock();
+        try {
+            HashMap<String, Table> map = tables;
+            if (map == null) {
+                map = database.newStringMap();
+                for (int type = 0; type < PgCatalogTable.META_TABLE_TYPE_COUNT; type++) {
+                    PgCatalogTable table = new PgCatalogTable(this, Constants.PG_CATALOG_SCHEMA_ID - type, type);
+                    map.put(table.getName(), table);
+                }
+                tables = map;
             }
-            tables = map;
+            return map;
+        } finally {
+            schemaLock.unlock();
         }
-        return map;
     }
 
 }

@@ -10,6 +10,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.Arrays;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBase;
 import org.h2.store.fs.Recorder;
 
@@ -21,11 +23,13 @@ class FileRec extends FileBase {
     private final FilePathRec rec;
     private final FileChannel channel;
     private final String name;
+    private final Lock lock;
 
     FileRec(FilePathRec rec, FileChannel file, String fileName) {
         this.rec = rec;
         this.channel = file;
         this.name = fileName;
+        this.lock = new ReentrantLock();
     }
 
     @Override
@@ -98,9 +102,14 @@ class FileRec extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
-        return channel.tryLock(position, size, shared);
+        lock.lock();
+        try {
+            return channel.tryLock(position, size, shared);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override

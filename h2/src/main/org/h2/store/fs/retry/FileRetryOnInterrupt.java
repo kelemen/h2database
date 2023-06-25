@@ -11,6 +11,8 @@ import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBase;
 import org.h2.store.fs.FileUtils;
 
@@ -24,10 +26,12 @@ class FileRetryOnInterrupt extends FileBase {
     private final String mode;
     private FileChannel channel;
     private FileLockRetry lock;
+    private final Lock objLock;
 
     FileRetryOnInterrupt(String fileName, String mode) throws IOException {
         this.fileName = fileName;
         this.mode = mode;
+        this.objLock = new ReentrantLock();
         open();
     }
 
@@ -49,11 +53,14 @@ class FileRetryOnInterrupt extends FileBase {
         // ensure we don't re-open concurrently;
         // sometimes we don't re-open, which is fine,
         // as this method is called in a loop
-        synchronized (this) {
+        objLock.lock();
+        try {
             if (before == channel) {
                 open();
                 reLock();
             }
+        } finally {
+            objLock.unlock();
         }
     }
 
@@ -189,14 +196,20 @@ class FileRetryOnInterrupt extends FileBase {
     }
 
     @Override
-    public synchronized FileLock tryLock(long position, long size,
+    public FileLock tryLock(long position, long size,
             boolean shared) throws IOException {
-        FileLock l = channel.tryLock(position, size, shared);
-        if (l == null) {
-            return null;
+
+        objLock.lock();
+        try {
+            FileLock l = channel.tryLock(position, size, shared);
+            if (l == null) {
+                return null;
+            }
+            lock = new FileLockRetry(l, this);
+            return lock;
+        } finally {
+            objLock.unlock();
         }
-        lock = new FileLockRetry(l, this);
-        return lock;
     }
 
     /**

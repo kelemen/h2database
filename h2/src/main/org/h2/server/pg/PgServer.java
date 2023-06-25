@@ -13,7 +13,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.server.Service;
@@ -72,14 +75,14 @@ public class PgServer implements Service {
     private boolean stop;
     private boolean trace;
     private ServerSocket serverSocket;
-    private final Set<PgServerThread> running = Collections.
-            synchronizedSet(new HashSet<PgServerThread>());
+    private final Set<PgServerThread> running = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final AtomicInteger pid = new AtomicInteger();
     private String baseDir;
     private boolean allowOthers;
     private boolean isDaemon;
     private boolean ifExists = true;
     private String key, keyDatabase;
+    private final Lock lock = new ReentrantLock();
 
     @Override
     public void init(String... args) {
@@ -130,8 +133,13 @@ public class PgServer implements Service {
      *
      * @param t the thread to remove
      */
-    synchronized void remove(PgServerThread t) {
-        running.remove(t);
+    void remove(PgServerThread t) {
+        lock.lock();
+        try {
+            running.remove(t);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.store.fs.FileBase;
 import org.h2.store.fs.FilePath;
 import org.h2.store.fs.FilePathWrapper;
@@ -61,6 +63,8 @@ public class FilePathCache extends FilePathWrapper {
             cache = new CacheLongKeyLIRS<>(cc);
         }
 
+        private final Lock lock = new ReentrantLock();
+
         FileCache(FileChannel base) {
             this.base = base;
         }
@@ -87,37 +91,42 @@ public class FilePathCache extends FilePathWrapper {
         }
 
         @Override
-        public synchronized int read(ByteBuffer dst, long position) throws IOException {
-            long cachePos = getCachePos(position);
-            int off = (int) (position - cachePos);
-            int len = CACHE_BLOCK_SIZE - off;
-            len = Math.min(len, dst.remaining());
-            ByteBuffer buff = cache.get(cachePos);
-            if (buff == null) {
-                buff = ByteBuffer.allocate(CACHE_BLOCK_SIZE);
-                long pos = cachePos;
-                while (true) {
-                    int read = base.read(buff, pos);
-                    if (read <= 0) {
-                        break;
+        public int read(ByteBuffer dst, long position) throws IOException {
+            lock.lock();
+            try {
+                long cachePos = getCachePos(position);
+                int off = (int) (position - cachePos);
+                int len = CACHE_BLOCK_SIZE - off;
+                len = Math.min(len, dst.remaining());
+                ByteBuffer buff = cache.get(cachePos);
+                if (buff == null) {
+                    buff = ByteBuffer.allocate(CACHE_BLOCK_SIZE);
+                    long pos = cachePos;
+                    while (true) {
+                        int read = base.read(buff, pos);
+                        if (read <= 0) {
+                            break;
+                        }
+                        if (buff.remaining() == 0) {
+                            break;
+                        }
+                        pos += read;
                     }
-                    if (buff.remaining() == 0) {
-                        break;
+                    int read = buff.position();
+                    if (read == CACHE_BLOCK_SIZE) {
+                        cache.put(cachePos, buff, CACHE_BLOCK_SIZE);
+                    } else {
+                        if (read <= 0) {
+                            return -1;
+                        }
+                        len = Math.min(len, read - off);
                     }
-                    pos += read;
                 }
-                int read = buff.position();
-                if (read == CACHE_BLOCK_SIZE) {
-                    cache.put(cachePos, buff, CACHE_BLOCK_SIZE);
-                } else {
-                    if (read <= 0) {
-                        return -1;
-                    }
-                    len = Math.min(len, read - off);
-                }
+                dst.put(buff.array(), off, len);
+                return len == 0 ? -1 : len;
+            } finally {
+                lock.unlock();
             }
-            dst.put(buff.array(), off, len);
-            return len == 0 ? -1 : len;
         }
 
         private static long getCachePos(long pos) {
@@ -130,22 +139,37 @@ public class FilePathCache extends FilePathWrapper {
         }
 
         @Override
-        public synchronized FileChannel truncate(long newSize) throws IOException {
-            cache.clear();
-            base.truncate(newSize);
-            return this;
+        public FileChannel truncate(long newSize) throws IOException {
+            lock.lock();
+            try {
+                cache.clear();
+                base.truncate(newSize);
+                return this;
+            } finally {
+                lock.unlock();
+            }
         }
 
         @Override
-        public synchronized int write(ByteBuffer src, long position) throws IOException {
-            clearCache(src, position);
-            return base.write(src, position);
+        public int write(ByteBuffer src, long position) throws IOException {
+            lock.lock();
+            try {
+                clearCache(src, position);
+                return base.write(src, position);
+            } finally {
+                lock.unlock();
+            }
         }
 
         @Override
-        public synchronized int write(ByteBuffer src) throws IOException {
-            clearCache(src, position());
-            return base.write(src);
+        public int write(ByteBuffer src) throws IOException {
+            lock.lock();
+            try {
+                clearCache(src, position());
+                return base.write(src);
+            } finally {
+                lock.unlock();
+            }
         }
 
         private void clearCache(ByteBuffer src, long position) {

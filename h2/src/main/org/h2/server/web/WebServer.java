@@ -30,6 +30,9 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.engine.Constants;
 import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
@@ -161,8 +164,7 @@ public class WebServer implements Service {
     private boolean allowOthers;
     private String externalNames;
     private boolean isDaemon;
-    private final Set<WebThread> running =
-            Collections.synchronizedSet(new HashSet<WebThread>());
+    private final Set<WebThread> running = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private boolean ssl;
     private byte[] adminPassword;
     private final HashMap<String, ConnectionInfo> connInfoMap = new HashMap<>();
@@ -185,6 +187,7 @@ public class WebServer implements Service {
     private String serverPropertiesDir = Constants.SERVER_PROPERTIES_DIR;
     // null means the history is not allowed to be stored
     private String commandHistoryString;
+    private final Lock lock = new ReentrantLock();
 
     /**
      * Read the given file from the file system or from the resources.
@@ -209,8 +212,13 @@ public class WebServer implements Service {
      *
      * @param t the thread to remove
      */
-    synchronized void remove(WebThread t) {
-        running.remove(t);
+    void remove(WebThread t) {
+        lock.lock();
+        try {
+            running.remove(t);
+        } finally {
+            lock.unlock();
+        }
     }
 
     private static String generateSessionId() {
@@ -714,32 +722,37 @@ public class WebServer implements Service {
      *
      * @return the list
      */
-    synchronized ArrayList<ConnectionInfo> getSettings() {
-        ArrayList<ConnectionInfo> settings = new ArrayList<>();
-        if (connInfoMap.size() == 0) {
-            Properties prop = loadProperties();
-            if (prop.size() == 0) {
-                for (String gen : GENERIC) {
-                    ConnectionInfo info = new ConnectionInfo(gen);
-                    settings.add(info);
-                    updateSetting(info);
+    ArrayList<ConnectionInfo> getSettings() {
+        lock.lock();
+        try {
+            ArrayList<ConnectionInfo> settings = new ArrayList<>();
+            if (connInfoMap.size() == 0) {
+                Properties prop = loadProperties();
+                if (prop.size() == 0) {
+                    for (String gen : GENERIC) {
+                        ConnectionInfo info = new ConnectionInfo(gen);
+                        settings.add(info);
+                        updateSetting(info);
+                    }
+                } else {
+                    for (int i = 0;; i++) {
+                        String data = prop.getProperty(Integer.toString(i));
+                        if (data == null) {
+                            break;
+                        }
+                        ConnectionInfo info = new ConnectionInfo(data);
+                        settings.add(info);
+                        updateSetting(info);
+                    }
                 }
             } else {
-                for (int i = 0;; i++) {
-                    String data = prop.getProperty(Integer.toString(i));
-                    if (data == null) {
-                        break;
-                    }
-                    ConnectionInfo info = new ConnectionInfo(data);
-                    settings.add(info);
-                    updateSetting(info);
-                }
+                settings.addAll(connInfoMap.values());
             }
-        } else {
-            settings.addAll(connInfoMap.values());
+            Collections.sort(settings);
+            return settings;
+        } finally {
+            lock.unlock();
         }
-        Collections.sort(settings);
-        return settings;
     }
 
     /**
@@ -747,43 +760,48 @@ public class WebServer implements Service {
      *
      * @param prop null or the properties webPort, webAllowOthers, and webSSL
      */
-    synchronized void saveProperties(Properties prop) {
+    void saveProperties(Properties prop) {
+        lock.lock();
         try {
-            if (prop == null) {
-                Properties old = loadProperties();
-                prop = new SortedProperties();
-                prop.setProperty("webPort",
-                        Integer.toString(SortedProperties.getIntProperty(old, "webPort", port)));
-                prop.setProperty("webAllowOthers",
-                        Boolean.toString(SortedProperties.getBooleanProperty(old, "webAllowOthers", allowOthers)));
-                if (externalNames != null) {
-                    prop.setProperty("webExternalNames", externalNames);
+            try {
+                if (prop == null) {
+                    Properties old = loadProperties();
+                    prop = new SortedProperties();
+                    prop.setProperty("webPort",
+                            Integer.toString(SortedProperties.getIntProperty(old, "webPort", port)));
+                    prop.setProperty("webAllowOthers",
+                            Boolean.toString(SortedProperties.getBooleanProperty(old, "webAllowOthers", allowOthers)));
+                    if (externalNames != null) {
+                        prop.setProperty("webExternalNames", externalNames);
+                    }
+                    prop.setProperty("webSSL",
+                            Boolean.toString(SortedProperties.getBooleanProperty(old, "webSSL", ssl)));
+                    if (adminPassword != null) {
+                        prop.setProperty("webAdminPassword", StringUtils.convertBytesToHex(adminPassword));
+                    }
+                    if (commandHistoryString != null) {
+                        prop.setProperty(COMMAND_HISTORY, commandHistoryString);
+                    }
                 }
-                prop.setProperty("webSSL",
-                        Boolean.toString(SortedProperties.getBooleanProperty(old, "webSSL", ssl)));
-                if (adminPassword != null) {
-                    prop.setProperty("webAdminPassword", StringUtils.convertBytesToHex(adminPassword));
+                ArrayList<ConnectionInfo> settings = getSettings();
+                int len = settings.size();
+                for (int i = 0; i < len; i++) {
+                    ConnectionInfo info = settings.get(i);
+                    if (info != null) {
+                        prop.setProperty(Integer.toString(len - i - 1), info.getString());
+                    }
                 }
-                if (commandHistoryString != null) {
-                    prop.setProperty(COMMAND_HISTORY, commandHistoryString);
+                if (!"null".equals(serverPropertiesDir)) {
+                    OutputStream out = FileUtils.newOutputStream(
+                            serverPropertiesDir + "/" + Constants.SERVER_PROPERTIES_NAME, false);
+                    prop.store(out, "H2 Server Properties");
+                    out.close();
                 }
+            } catch (Exception e) {
+                DbException.traceThrowable(e);
             }
-            ArrayList<ConnectionInfo> settings = getSettings();
-            int len = settings.size();
-            for (int i = 0; i < len; i++) {
-                ConnectionInfo info = settings.get(i);
-                if (info != null) {
-                    prop.setProperty(Integer.toString(len - i - 1), info.getString());
-                }
-            }
-            if (!"null".equals(serverPropertiesDir)) {
-                OutputStream out = FileUtils.newOutputStream(
-                        serverPropertiesDir + "/" + Constants.SERVER_PROPERTIES_NAME, false);
-                prop.store(out, "H2 Server Properties");
-                out.close();
-            }
-        } catch (Exception e) {
-            DbException.traceThrowable(e);
+        } finally {
+            lock.unlock();
         }
     }
 

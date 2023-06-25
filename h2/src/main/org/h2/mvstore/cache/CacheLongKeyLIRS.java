@@ -12,6 +12,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.mvstore.DataUtils;
 
 /**
@@ -44,7 +46,7 @@ import org.h2.mvstore.DataUtils;
  * @param <V> the value type
  */
 public class CacheLongKeyLIRS<V> {
-
+    private final Lock lock = new ReentrantLock();
     /**
      * The maximum memory this cache should use.
      */
@@ -161,9 +163,13 @@ public class CacheLongKeyLIRS<V> {
         // check whether resize is required: synchronize on s, to avoid
         // concurrent resizes (concurrent reads read
         // from the old segment)
-        synchronized (s) {
+        Lock segmentLock = s.lock;
+        segmentLock.lock();
+        try {
             s = resizeIfNeeded(s, segmentIndex);
             return s.put(key, hash, value, memory);
+        } finally {
+            segmentLock.unlock();
         }
     }
 
@@ -208,9 +214,13 @@ public class CacheLongKeyLIRS<V> {
         // check whether resize is required: synchronize on s, to avoid
         // concurrent resizes (concurrent reads read
         // from the old segment)
-        synchronized (s) {
+        Lock segmentLock = s.lock;
+        segmentLock.lock();
+        try {
             s = resizeIfNeeded(s, segmentIndex);
             return s.remove(key, hash);
+        } finally {
+            segmentLock.unlock();
         }
     }
 
@@ -312,8 +322,13 @@ public class CacheLongKeyLIRS<V> {
      *
      * @return the entry set
      */
-    public synchronized Set<Map.Entry<Long, V>> entrySet() {
-        return getMap().entrySet();
+    public Set<Map.Entry<Long, V>> entrySet() {
+        lock.lock();
+        try {
+            return getMap().entrySet();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -491,8 +506,12 @@ public class CacheLongKeyLIRS<V> {
      */
     public void trimNonResidentQueue() {
         for (Segment<V> s : segments) {
-            synchronized (s) {
+            Lock segmentLock = s.lock;
+            segmentLock.lock();
+            try {
                 s.trimNonResidentQueue();
+            } finally {
+                segmentLock.unlock();
             }
         }
     }
@@ -503,6 +522,7 @@ public class CacheLongKeyLIRS<V> {
      * @param <V> the value type
      */
     private static class Segment<V> {
+        final Lock lock = new ReentrantLock();
 
         /**
          * The number of (hot, cold, and non-resident) entries in the map.
@@ -710,17 +730,22 @@ public class CacheLongKeyLIRS<V> {
          * @param e the entry
          * @return the value, or null if there is no resident entry
          */
-        synchronized V get(Entry<V> e) {
-            V value = e == null ? null : e.getValue();
-            if (value == null) {
-                // the entry was not found
-                // or it was a non-resident entry
-                misses++;
-            } else {
-                access(e);
-                hits++;
+        V get(Entry<V> e) {
+            lock.lock();
+            try {
+                V value = e == null ? null : e.getValue();
+                if (value == null) {
+                    // the entry was not found
+                    // or it was a non-resident entry
+                    misses++;
+                } else {
+                    access(e);
+                    hits++;
+                }
+                return value;
+            } finally {
+                lock.unlock();
             }
-            return value;
         }
 
         /**
@@ -787,41 +812,46 @@ public class CacheLongKeyLIRS<V> {
          * @param memory the memory used for the given entry
          * @return the old value, or null if there was no resident entry
          */
-        synchronized V put(long key, int hash, V value, int memory) {
-            Entry<V> e = find(key, hash);
-            boolean existed = e != null;
-            V old = null;
-            if (existed) {
-                old = e.getValue();
-                remove(key, hash);
-            }
-            if (memory > maxMemory) {
-                // the new entry is too big to fit
-                return old;
-            }
-            e = new Entry<>(key, value, memory);
-            int index = hash & mask;
-            e.mapNext = entries[index];
-            entries[index] = e;
-            usedMemory += memory;
-            if (usedMemory > maxMemory) {
-                // old entries needs to be removed
-                evict();
-                // if the cache is full, the new entry is
-                // cold if possible
-                if (stackSize > 0) {
-                    // the new cold entry is at the top of the queue
-                    addToQueue(queue, e);
+        V put(long key, int hash, V value, int memory) {
+            lock.lock();
+            try {
+                Entry<V> e = find(key, hash);
+                boolean existed = e != null;
+                V old = null;
+                if (existed) {
+                    old = e.getValue();
+                    remove(key, hash);
                 }
+                if (memory > maxMemory) {
+                    // the new entry is too big to fit
+                    return old;
+                }
+                e = new Entry<>(key, value, memory);
+                int index = hash & mask;
+                e.mapNext = entries[index];
+                entries[index] = e;
+                usedMemory += memory;
+                if (usedMemory > maxMemory) {
+                    // old entries needs to be removed
+                    evict();
+                    // if the cache is full, the new entry is
+                    // cold if possible
+                    if (stackSize > 0) {
+                        // the new cold entry is at the top of the queue
+                        addToQueue(queue, e);
+                    }
+                }
+                mapSize++;
+                // added entries are always added to the stack
+                addToStack(e);
+                if (existed) {
+                    // if it was there before (even non-resident), it becomes hot
+                    access(e);
+                }
+                return old;
+            } finally {
+                lock.unlock();
             }
-            mapSize++;
-            // added entries are always added to the stack
-            addToStack(e);
-            if (existed) {
-                // if it was there before (even non-resident), it becomes hot
-                access(e);
-            }
-            return old;
         }
 
         /**
@@ -832,46 +862,52 @@ public class CacheLongKeyLIRS<V> {
          * @param hash the hash
          * @return the old value, or null if there was no resident entry
          */
-        synchronized V remove(long key, int hash) {
-            int index = hash & mask;
-            Entry<V> e = entries[index];
-            if (e == null) {
-                return null;
-            }
-            if (e.key == key) {
-                entries[index] = e.mapNext;
-            } else {
-                Entry<V> last;
-                do {
-                    last = e;
-                    e = e.mapNext;
-                    if (e == null) {
-                        return null;
-                    }
-                } while (e.key != key);
-                last.mapNext = e.mapNext;
-            }
-            V old = e.getValue();
-            mapSize--;
-            usedMemory -= e.getMemory();
-            if (e.stackNext != null) {
-                removeFromStack(e);
-            }
-            if (e.isHot()) {
-                // when removing a hot entry, the newest cold entry gets hot,
-                // so the number of hot entries does not change
-                e = queue.queueNext;
-                if (e != queue) {
-                    removeFromQueue(e);
-                    if (e.stackNext == null) {
-                        addToStackBottom(e);
-                    }
+        V remove(long key, int hash) {
+            lock.lock();
+            try {
+
+                int index = hash & mask;
+                Entry<V> e = entries[index];
+                if (e == null) {
+                    return null;
                 }
-                pruneStack();
-            } else {
-                removeFromQueue(e);
+                if (e.key == key) {
+                    entries[index] = e.mapNext;
+                } else {
+                    Entry<V> last;
+                    do {
+                        last = e;
+                        e = e.mapNext;
+                        if (e == null) {
+                            return null;
+                        }
+                    } while (e.key != key);
+                    last.mapNext = e.mapNext;
+                }
+                V old = e.getValue();
+                mapSize--;
+                usedMemory -= e.getMemory();
+                if (e.stackNext != null) {
+                    removeFromStack(e);
+                }
+                if (e.isHot()) {
+                    // when removing a hot entry, the newest cold entry gets hot,
+                    // so the number of hot entries does not change
+                    e = queue.queueNext;
+                    if (e != queue) {
+                        removeFromQueue(e);
+                        if (e.stackNext == null) {
+                            addToStackBottom(e);
+                        }
+                    }
+                    pruneStack();
+                } else {
+                    removeFromQueue(e);
+                }
+                return old;
+            } finally {
+                lock.unlock();
             }
-            return old;
         }
 
         /**
@@ -1031,21 +1067,26 @@ public class CacheLongKeyLIRS<V> {
          * @param nonResident true for non-resident entries
          * @return the key list
          */
-        synchronized List<Long> keys(boolean cold, boolean nonResident) {
-            ArrayList<Long> keys = new ArrayList<>();
-            if (cold) {
-                Entry<V> start = nonResident ? queue2 : queue;
-                for (Entry<V> e = start.queueNext; e != start;
-                        e = e.queueNext) {
-                    keys.add(e.key);
+        List<Long> keys(boolean cold, boolean nonResident) {
+            lock.lock();
+            try {
+                ArrayList<Long> keys = new ArrayList<>();
+                if (cold) {
+                    Entry<V> start = nonResident ? queue2 : queue;
+                    for (Entry<V> e = start.queueNext; e != start;
+                            e = e.queueNext) {
+                        keys.add(e.key);
+                    }
+                } else {
+                    for (Entry<V> e = stack.stackNext; e != stack;
+                            e = e.stackNext) {
+                        keys.add(e.key);
+                    }
                 }
-            } else {
-                for (Entry<V> e = stack.stackNext; e != stack;
-                        e = e.stackNext) {
-                    keys.add(e.key);
-                }
+                return keys;
+            } finally {
+                lock.unlock();
             }
-            return keys;
         }
 
         /**
@@ -1053,15 +1094,20 @@ public class CacheLongKeyLIRS<V> {
          *
          * @return the set of keys
          */
-        synchronized Set<Long> keySet() {
-            HashSet<Long> set = new HashSet<>();
-            for (Entry<V> e = stack.stackNext; e != stack; e = e.stackNext) {
-                set.add(e.key);
+        Set<Long> keySet() {
+            lock.lock();
+            try {
+                HashSet<Long> set = new HashSet<>();
+                for (Entry<V> e = stack.stackNext; e != stack; e = e.stackNext) {
+                    set.add(e.key);
+                }
+                for (Entry<V> e = queue.queueNext; e != queue; e = e.queueNext) {
+                    set.add(e.key);
+                }
+                return set;
+            } finally {
+                lock.unlock();
             }
-            for (Entry<V> e = queue.queueNext; e != queue; e = e.queueNext) {
-                set.add(e.key);
-            }
-            return set;
         }
 
         /**

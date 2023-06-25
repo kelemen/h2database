@@ -8,6 +8,8 @@ package org.h2.engine;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
 import org.h2.command.dml.SetTypes;
@@ -31,7 +33,9 @@ import org.h2.util.Utils;
  * This is a singleton class.
  */
 public final class Engine {
+    private static final Lock CLASS_LOCK = new ReentrantLock();
 
+    private static final Lock DATABASES_LOCK = new ReentrantLock();
     private static final Map<String, DatabaseHolder> DATABASES = new HashMap<>();
 
     private static volatile long WRONG_PASSWORD_DELAY = SysProperties.DELAY_WRONG_PASSWORD_MIN;
@@ -54,13 +58,18 @@ public final class Engine {
         User user = null;
         DatabaseHolder databaseHolder;
         if (!ci.isUnnamedInMemory()) {
-            synchronized (DATABASES) {
+            DATABASES_LOCK.lock();
+            try {
                 databaseHolder = DATABASES.computeIfAbsent(name, (key) -> new DatabaseHolder());
+            } finally {
+                DATABASES_LOCK.unlock();
             }
         } else {
             databaseHolder = new DatabaseHolder();
         }
-        synchronized (databaseHolder) {
+        Lock holderLock = databaseHolder.holderLock;
+        holderLock.lock();
+        try {
             database = databaseHolder.database;
             if (database == null || openNew) {
                 if (ci.isPersistent()) {
@@ -108,6 +117,8 @@ public final class Engine {
                 }
                 databaseHolder.database = database;
             }
+        } finally {
+            holderLock.unlock();
         }
 
         if (opened) {
@@ -235,7 +246,9 @@ public final class Engine {
                 throw DbException.get(ErrorCode.DATABASE_CALLED_AT_SHUTDOWN);
             }
         }
-        synchronized (session) {
+        Lock sessionLock = session.sessionLock();
+        sessionLock.lock();
+        try {
             session.setAllowLiterals(true);
             DbSettings defaultSettings = DbSettings.DEFAULT;
             for (String setting : ci.getKeys()) {
@@ -286,6 +299,8 @@ public final class Engine {
             }
             session.setAllowLiterals(false);
             session.commit(true);
+        } finally {
+            sessionLock.unlock();
         }
         return session;
     }
@@ -327,8 +342,11 @@ public final class Engine {
                 throw DbException.get(ErrorCode.FEATURE_NOT_SUPPORTED_1, e, "JMX");
             }
         }
-        synchronized (DATABASES) {
+        DATABASES_LOCK.lock();
+        try {
             DATABASES.remove(name);
+        } finally {
+            DATABASES_LOCK.unlock();
         }
     }
 
@@ -356,7 +374,8 @@ public final class Engine {
             if (delay > min && delay > 0) {
                 // the first correct password must be blocked,
                 // otherwise parallel attacks are possible
-                synchronized (Engine.class) {
+                CLASS_LOCK.lock();
+                try {
                     // delay up to the last delay
                     // an attacker can't know how long it will be
                     delay = MathUtils.secureRandomInt((int) delay);
@@ -366,12 +385,15 @@ public final class Engine {
                         // ignore
                     }
                     WRONG_PASSWORD_DELAY = min;
+                } finally {
+                    CLASS_LOCK.unlock();
                 }
             }
         } else {
             // this method is not synchronized on the Engine, so that
             // regular successful attempts are not blocked
-            synchronized (Engine.class) {
+            CLASS_LOCK.lock();
+            try {
                 long delay = WRONG_PASSWORD_DELAY;
                 int max = SysProperties.DELAY_WRONG_PASSWORD_MAX;
                 if (max <= 0) {
@@ -391,6 +413,8 @@ public final class Engine {
                     }
                 }
                 throw DbException.get(ErrorCode.WRONG_USER_OR_PASSWORD);
+            } finally {
+                CLASS_LOCK.unlock();
             }
         }
     }
@@ -399,8 +423,10 @@ public final class Engine {
     }
 
     private static final class DatabaseHolder {
+        private final Lock holderLock;
 
         DatabaseHolder() {
+            this.holderLock = new ReentrantLock();
         }
 
         volatile Database database;

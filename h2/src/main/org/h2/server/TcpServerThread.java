@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Objects;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.api.ErrorCode;
 import org.h2.command.Command;
 import org.h2.engine.ConnectionInfo;
@@ -349,8 +351,12 @@ public class TcpServerThread implements Runnable {
             setParameters(command);
             int old = session.getModificationId();
             ResultInterface result;
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 result = command.executeQuery(maxRows, false);
+            } finally {
+                sessionLock.unlock();
             }
             cache.addObject(objectId, result);
             int columnCount = result.getVisibleColumnCount();
@@ -404,8 +410,12 @@ public class TcpServerThread implements Runnable {
             }
             int old = session.getModificationId();
             ResultWithGeneratedKeys result;
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 result = command.executeUpdate(generatedKeysRequest);
+            } finally {
+                sessionLock.unlock();
             }
             int status;
             if (session.isClosed()) {
@@ -528,8 +538,12 @@ public class TcpServerThread implements Runnable {
             }
             int old = session.getModificationId();
             ResultInterface result;
-            synchronized (session) {
+            Lock sessionLock = session.sessionLock();
+            sessionLock.lock();
+            try {
                 result = DatabaseMetaServer.process(session, code, args);
+            } finally {
+                sessionLock.unlock();
             }
             int columnCount = result.getVisibleColumnCount();
             int state = getState(old);

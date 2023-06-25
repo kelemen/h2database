@@ -9,6 +9,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.LinkedList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.h2.util.IOUtils;
 
 /**
@@ -17,6 +20,8 @@ import org.h2.util.IOUtils;
 public class OutputCatcher extends Thread {
     private final InputStream in;
     private final LinkedList<String> list = new LinkedList<>();
+    private final Lock listLock = new ReentrantLock();
+    private final Condition listCondition = listLock.newCondition();
 
     public OutputCatcher(InputStream in) {
         this.in = in;
@@ -31,12 +36,13 @@ public class OutputCatcher extends Thread {
     public String readLine(long wait) {
         long start = System.nanoTime();
         while (true) {
-            synchronized (list) {
+            listLock.lock();
+            try {
                 if (list.size() > 0) {
                     return list.removeFirst();
                 }
                 try {
-                    list.wait(wait);
+                    listCondition.await(wait, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     // ignore
                 }
@@ -44,6 +50,8 @@ public class OutputCatcher extends Thread {
                 if (time >= TimeUnit.MILLISECONDS.toNanos(wait)) {
                     return null;
                 }
+            } finally {
+                listLock.unlock();
             }
         }
     }
@@ -62,9 +70,12 @@ public class OutputCatcher extends Thread {
                         if (buff.length() > 0) {
                             String s = buff.toString();
                             buff.setLength(0);
-                            synchronized (list) {
+                            listLock.lock();
+                            try {
                                 list.add(s);
-                                list.notifyAll();
+                                listCondition.signalAll();
+                            } finally {
+                                listLock.unlock();
                             }
                         }
                     } else {
@@ -78,9 +89,12 @@ public class OutputCatcher extends Thread {
         } finally {
             // just in case something goes wrong, make sure we store any partial output we got
             if (buff.length() > 0) {
-                synchronized (list) {
+                listLock.lock();
+                try {
                     list.add(buff.toString());
-                    list.notifyAll();
+                    listCondition.signalAll();
+                } finally {
+                    listLock.unlock();
                 }
             }
         }
