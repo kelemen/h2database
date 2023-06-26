@@ -331,6 +331,7 @@ import org.h2.expression.function.RegexpFunction;
 import org.h2.expression.function.SessionControlFunction;
 import org.h2.expression.function.SetFunction;
 import org.h2.expression.function.SignalFunction;
+import org.h2.expression.function.SleepFunction;
 import org.h2.expression.function.SoundexFunction;
 import org.h2.expression.function.StringFunction;
 import org.h2.expression.function.StringFunction1;
@@ -4061,6 +4062,8 @@ public class Parser {
 
     private Expression readBuiltinFunctionIf(String upperName) {
         switch (upperName) {
+        case "SLEEP":
+            return new SleepFunction(readSingleArgument());
         case "ABS":
             return new MathFunction(readSingleArgument(), null, MathFunction.ABS);
         case "MOD":
